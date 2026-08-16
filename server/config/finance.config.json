@@ -1,0 +1,50 @@
+{
+  "$comment": [
+    "Everything the dashboard knows about your accounts, cards, and categories.",
+    "Edit this file and restart the API (or run `pnpm sync-config`) to apply it.",
+    "",
+    "Accounts are matched on name. A new entry is created with its openingBalance",
+    "and no transactions; an entry that already exists is left alone, so editing",
+    "openingBalance afterwards does nothing and renaming creates a second account.",
+    "Nothing is ever deleted here, because transactions reference these rows.",
+    "",
+    "kind is 'bank' or 'credit_card'. For a card, charges push the balance",
+    "negative and the dashboard shows the amount owed.",
+    "",
+    "role is optional and wires up the fixed buttons: 'salary' is where Add",
+    "Salary credits to, 'primary' is where Transfer sends money. Use each once."
+  ],
+
+  "accounts": [
+    {
+      "name": "Primary Account",
+      "kind": "bank",
+      "role": "primary",
+      "currency": "INR",
+      "openingBalance": 8748.31
+    },
+    {
+      "name": "Salary Account",
+      "kind": "bank",
+      "role": "salary",
+      "currency": "INR",
+      "openingBalance": 550000.0
+    },
+    {
+      "name": "SBI Elite",
+      "kind": "credit_card",
+      "currency": "INR",
+      "openingBalance": 0
+    }
+  ],
+
+  "categories": [
+    { "name": "Grocery", "icon": "🛒", "color": "#30d158" },
+    { "name": "Rent", "icon": "🏠", "color": "#5b5cf6" },
+    { "name": "Electricity", "icon": "⚡", "color": "#ff9f0a" },
+    { "name": "Gym", "icon": "🏋️", "color": "#ff6b6b" },
+    { "name": "Food", "icon": "🍽️", "color": "#0a84ff" },
+    { "name": "Outing", "icon": "🎭", "color": "#bf5af2" },
+    { "name": "Others", "icon": "📦", "color": "#8e8e93" }
+  ]
+}

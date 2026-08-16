@@ -1,0 +1,30 @@
+{
+  "name": "financial-tracker-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=.env src/index.ts",
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "seed": "node --env-file-if-exists=.env src/scripts/seed.ts",
+    "sync-config": "node --env-file-if-exists=.env src/scripts/sync-config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.0.0",
+    "pg": "^8.13.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.7.0"
+  }
+}

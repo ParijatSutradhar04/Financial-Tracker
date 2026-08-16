@@ -1,0 +1,8 @@
+{
+  "title": "Finance — Personal dashboard",
+  "description": "Track balances, expenses, and transfers across your accounts.",
+  "language": "en",
+  "robots": {
+    "index": false
+  }
+}
