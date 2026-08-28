@@ -1,0 +1,22 @@
+{
+  "cli": {
+    "version": ">= 22.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://financial-tracker-seven-pi.vercel.app",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://unaxuiqvgajdhvtmmygn.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVuYXh1aXF2Z2FqZGh2dG1teWduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4Mjg5OTYsImV4cCI6MjEwMzQwNDk5Nn0._I7uIC5JHXOYGyssHGhdwi_0UqYQX40JlHMPJlDcZ1k"
+      }
+    },
+    "production": {
+      "autoIncrement": true
+    }
+  }
+}

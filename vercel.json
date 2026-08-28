@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "web": {
+      "root": "app/",
+      "buildCommand": "npm install && EXPO_PUBLIC_API_URL= npx expo export --platform web",
+      "outputDirectory": "dist"
+    },
+    "api": {
+      "root": "api/",
+      "entrypoint": "index:app"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": { "service": "api" } },
+    { "source": "/(.*)", "destination": { "service": "web" } }
+  ]
+}

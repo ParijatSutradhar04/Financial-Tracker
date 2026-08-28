@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Destroys the Postgres container and its volume and recreates both, leaving
-# every account and credit card in server/config/finance.config.json at its
+# every account and credit card in api/config/finance.config.json at its
 # opening balance with no transactions recorded against it.
 #
 # Transactions are immutable by design, so recreating the volume is the only way
@@ -11,7 +11,6 @@
 #
 #   ./scripts/reset-db.sh          prompts, then resets to an empty ledger
 #   ./scripts/reset-db.sh --yes    skips the prompt
-#   ./scripts/reset-db.sh --seed   also loads the 35-row sample ledger
 #
 # Opening balances are not flags here: they live in finance.config.json next to
 # the accounts they belong to, so editing them there covers both a reset and the
@@ -31,11 +30,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 assume_yes=false
-seed=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) assume_yes=true ;;
-    --seed) seed=true ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -87,19 +84,12 @@ done
 
 psql() { docker exec -i "$CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"; }
 
-server() { (cd "$ROOT/server" && { [ -d node_modules ] || pnpm install; } && pnpm "$@"); }
-
 # init.sql creates the schema and nothing else. Accounts come from the config,
 # applied here rather than by waiting for the API to restart. They arrive as
 # inserts, which the reconciliation trigger does not watch, so each one starts at
 # its opening balance with an empty ledger and no Adjustment row.
-echo "==> Creating accounts from server/config/finance.config.json"
-server sync-config
-
-if [ "$seed" = true ]; then
-  echo "==> Loading the sample ledger"
-  server seed
-fi
+echo "==> Creating accounts from api/config/finance.config.json"
+(cd "$ROOT/api" && .venv/bin/python scripts/provision.py)
 
 echo "==> Result"
 psql -tAc "SELECT '    ' || name || ' (' || kind || '): ' || last_reconciled_balance FROM accounts ORDER BY created_at, name;"

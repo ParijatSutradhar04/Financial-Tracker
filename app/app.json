@@ -1,0 +1,38 @@
+{
+  "expo": {
+    "name": "Financial Tracker",
+    "slug": "financial-tracker",
+    "scheme": "financial-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.parijat.financialtracker",
+      "adaptiveIcon": {
+        "backgroundColor": "#f5f5f7",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-font",
+      "@react-native-community/datetimepicker"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "14ca6fa8-d9b1-4cd9-a0d1-765f578c4117"
+      }
+    },
+    "owner": "parijatsutradhars-team"
+  }
+}
