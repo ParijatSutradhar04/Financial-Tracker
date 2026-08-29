@@ -46,6 +46,8 @@
     { "name": "Gym", "icon": "🏋️", "color": "#ff6b6b" },
     { "name": "Food", "icon": "🍽️", "color": "#0a84ff" },
     { "name": "Outing", "icon": "🎭", "color": "#bf5af2" },
+    { "name": "Local Travel", "icon": "🚌", "color": "#64d2ff" },
+    { "name": "Travel", "icon": "✈️", "color": "#5e5ce6" },
     { "name": "Others", "icon": "📦", "color": "#8e8e93" }
   ]
 }
