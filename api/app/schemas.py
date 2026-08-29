@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 from .config import settings
-from .finance_config import spend_category_names
 from .services.dates import today_iso
 
 _UUID_RE = re.compile(
@@ -77,12 +76,6 @@ def _validate_positive_money(value: object) -> float:
     return amount
 
 
-def _validate_category(value: str) -> str:
-    if value not in spend_category_names:
-        raise ValueError(f"Category must be one of: {', '.join(spend_category_names)}")
-    return value
-
-
 def _validate_description(value: str, *, required: bool) -> str:
     trimmed = value.strip() if value else ""
     if required and not trimmed:
@@ -90,6 +83,15 @@ def _validate_description(value: str, *, required: bool) -> str:
     if len(trimmed) > 500:
         raise ValueError("String should have at most 500 characters")
     return trimmed
+
+
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _validate_color(value: str) -> str:
+    if not isinstance(value, str) or not _COLOR_RE.match(value):
+        raise ValueError("Expected a #rrggbb colour")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +111,10 @@ class AccountOut(CamelModel):
 
 
 class CategoryOut(CamelModel):
+    # None for the reserved categories (Transfer/Adjustment/Salary) — those
+    # are backend-owned constants, not rows in the categories table, so
+    # there's nothing to edit or delete.
+    id: Optional[str] = None
     name: str
     icon: str
     color: str
@@ -182,11 +188,6 @@ class CreateTransactionIn(CamelModel):
     def _amount(cls, v: object) -> float:
         return _validate_positive_money(v)
 
-    @field_validator("category")
-    @classmethod
-    def _category(cls, v: str) -> str:
-        return _validate_category(v)
-
     @field_validator("description")
     @classmethod
     def _description(cls, v: str) -> str:
@@ -196,6 +197,12 @@ class CreateTransactionIn(CamelModel):
     @classmethod
     def _date(cls, v: str) -> str:
         return _validate_not_in_future(_validate_iso_date(v))
+
+
+class CreateCreditIn(CreateTransactionIn):
+    """Same shape as an expense — a manual credit to any account, picked from
+    the same category list. Kept as a distinct name for the route/response it
+    belongs to; the account defaults to the primary account client-side."""
 
 
 class CreateSalaryIn(CamelModel):
@@ -281,3 +288,27 @@ class ReconcileIn(CamelModel):
         if len(set(ids)) != len(ids):
             raise ValueError("Each account may only appear once")
         return self
+
+
+class CreateAccountIn(CamelModel):
+    name: str = Field(min_length=1, max_length=100)
+    kind: Literal["bank", "credit_card"]
+    # Negative for a credit card: the frontend sends -outstanding, matching
+    # the sign convention AccountOut.outstanding already uses on the way out.
+    opening_balance: float
+
+    @field_validator("opening_balance")
+    @classmethod
+    def _opening_balance(cls, v: object) -> float:
+        return _validate_money(v)
+
+
+class CategoryIn(CamelModel):
+    name: str = Field(min_length=1, max_length=50)
+    icon: str = Field(min_length=1, max_length=10)
+    color: str
+
+    @field_validator("color")
+    @classmethod
+    def _color(cls, v: str) -> str:
+        return _validate_color(v)

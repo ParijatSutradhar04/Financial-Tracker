@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from ..db import acquire
 from ..domain import RESERVED_CATEGORY_STYLES
-from ..finance_config import finance_config
+from ..services.categories import list_categories
 from ..schemas import CategoryOut, ConfigOut
 
 router = APIRouter()
@@ -16,10 +17,10 @@ router = APIRouter()
 
 @router.get("", response_model=ConfigOut)
 async def get_config() -> ConfigOut:
-    categories = [
-        CategoryOut(name=c.name, icon=c.icon, color=c.color, spendable=True, hidden=False)
-        for c in finance_config.categories
-    ] + [
+    async with acquire() as conn:
+        db_categories = await list_categories(conn)
+
+    categories = [CategoryOut(**c) for c in db_categories] + [
         CategoryOut(
             name=style["name"],
             icon=style["icon"],

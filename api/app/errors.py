@@ -30,6 +30,7 @@ def not_found(message: str) -> HttpError:
 
 _CHECK_VIOLATION = "23514"
 _FOREIGN_KEY_VIOLATION = "23503"
+_UNIQUE_VIOLATION = "23505"
 _RAISE_EXCEPTION = "P0001"
 
 
@@ -59,7 +60,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         # of those mean the caller sent something invalid, not that the server
         # broke.
         code = getattr(exc, "sqlstate", None)
-        if code in (_CHECK_VIOLATION, _FOREIGN_KEY_VIOLATION, _RAISE_EXCEPTION):
+        if code in (_CHECK_VIOLATION, _FOREIGN_KEY_VIOLATION, _UNIQUE_VIOLATION, _RAISE_EXCEPTION):
             return JSONResponse(status_code=400, content={"error": str(exc)})
         logger.exception("Unhandled Postgres error")
         return JSONResponse(status_code=500, content={"error": "Internal server error"})

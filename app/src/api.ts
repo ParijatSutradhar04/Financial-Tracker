@@ -15,6 +15,8 @@ export interface Account {
 }
 
 export interface Category {
+  /** Absent for the reserved Transfer/Adjustment/Salary rows, which aren't DB-backed. */
+  id?: string;
   name: string;
   icon: string;
   color: string;
@@ -76,6 +78,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(body?.error ?? `Request failed with status ${response.status}`);
   }
 
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -119,5 +122,40 @@ export const api = {
     request<{ accounts: Account[]; adjustments: Transaction[] }>('/reconcile', {
       method: 'POST',
       body: json({ balances }),
+    }),
+
+  addCredit: (body: {
+    accountId: string;
+    amount: number;
+    category: string;
+    description: string;
+    date: string;
+  }) =>
+    request<{ transaction: Transaction; account: Account }>('/credits', {
+      method: 'POST',
+      body: json(body),
+    }),
+
+  addAccount: (body: { name: string; kind: 'bank' | 'credit_card'; openingBalance: number }) =>
+    request<Account>('/accounts', {
+      method: 'POST',
+      body: json(body),
+    }),
+
+  addCategory: (body: { name: string; icon: string; color: string }) =>
+    request<Category>('/categories', {
+      method: 'POST',
+      body: json(body),
+    }),
+
+  updateCategory: (id: string, body: { name: string; icon: string; color: string }) =>
+    request<Category>(`/categories/${id}`, {
+      method: 'PATCH',
+      body: json(body),
+    }),
+
+  deleteCategory: (id: string) =>
+    request<void>(`/categories/${id}`, {
+      method: 'DELETE',
     }),
 };

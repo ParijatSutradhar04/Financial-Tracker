@@ -101,3 +101,17 @@ EXECUTE FUNCTION fn_prevent_transaction_modifications();
 -- Nothing is seeded here. The backend creates any account or credit card listed
 -- in server/config/finance.config.json that does not exist yet, on startup and
 -- via `pnpm sync-config`, using the opening balance given there.
+
+-- 6. Categories Table
+-- Replaces the old static finance.config.json category list as the runtime
+-- source of truth. The config file's categories array is now only read once,
+-- to seed this table for a brand new database (see api/scripts/provision.py).
+CREATE TABLE IF NOT EXISTS categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(50) NOT NULL UNIQUE,
+    icon VARCHAR(10) NOT NULL,
+    color VARCHAR(7) NOT NULL,
+    spendable BOOLEAN NOT NULL DEFAULT true,
+    hidden BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT clock_timestamp()
+);

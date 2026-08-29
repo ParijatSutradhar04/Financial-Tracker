@@ -113,6 +113,30 @@ export function CreditCardIcon({ size = 18, color = '#ff9f0a' }: { size?: number
   );
 }
 
+export function EditIcon({ size = 13, color = '#8e8e93' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+      <Path
+        d="M9.5 1.5l3 3-7 7-3.5 1 1-3.5 7-7z"
+        stroke={color}
+        strokeWidth={1.3}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+export function TrashIcon({ size = 13, color = '#ff3b30' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+      <Path d="M2 3.5h10M5.5 3.5V2h3v1.5" stroke={color} strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
+      <Path d="M3 3.5l.6 8.5a1 1 0 001 .9h4.8a1 1 0 001-.9l.6-8.5" stroke={color} strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
+      <Path d="M5.6 6v4M8.4 6v4" stroke={color} strokeWidth={1.3} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
 export function EmptyBoxIcon({ size = 32, color = '#8e8e93' }: { size?: number; color?: string }) {
   return (
     <Svg width={size} height={size} viewBox="0 0 32 32" fill="none">

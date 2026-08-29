@@ -1,8 +1,10 @@
 """Accounts, credit cards, and spend categories, read from finance.config.json.
 
-Mirrors server/src/finance-config.ts. This is the one place any of them are
-declared: the database gets its rows from here via scripts/provision.py, and
-the frontend gets its category list and styling from GET /api/config.
+Mirrors server/src/finance-config.ts. Accounts and cards can still be
+provisioned from here (scripts/provision.py), though the app can also create
+them directly now (POST /api/accounts). Categories are seeded from here once,
+into the `categories` table (services/categories.py:provision_categories) —
+after that, the table is the runtime source of truth, not this file.
 """
 
 from __future__ import annotations
@@ -89,9 +91,6 @@ def _load() -> FinanceConfig:
 # than surface as a confusing failure on the first request that happens to
 # need it.
 finance_config = _load()
-
-# Categories the user may pick in the Add Expense modal.
-spend_category_names: list[str] = [c.name for c in finance_config.categories]
 
 _roles_by_name: dict[str, str] = {
     a.name.lower(): a.role for a in finance_config.accounts if a.role

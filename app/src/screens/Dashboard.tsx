@@ -10,10 +10,13 @@ import { SparkbarChart } from '../components/SparkbarChart';
 import { AccountCard } from '../components/AccountCard';
 import { CreditCardCard } from '../components/CreditCardCard';
 import { AddExpenseModal } from '../components/modals/AddExpenseModal';
+import { AddCreditModal } from '../components/modals/AddCreditModal';
+import { AddAccountModal } from '../components/modals/AddAccountModal';
+import { ManageCategoriesModal } from '../components/modals/ManageCategoriesModal';
 import { AddSalaryModal } from '../components/modals/AddSalaryModal';
 import { TransferModal } from '../components/modals/TransferModal';
 import { ReconcileModal } from '../components/modals/ReconcileModal';
-import { ClockIcon, EmptyBoxIcon, PlusIcon, SalaryUpArrowIcon, ArrowRightIcon } from '../components/icons';
+import { ClockIcon, EditIcon, EmptyBoxIcon, PlusIcon, SalaryUpArrowIcon, ArrowRightIcon } from '../components/icons';
 
 export function Dashboard() {
   const now = new Date();
@@ -33,6 +36,9 @@ export function Dashboard() {
   const [showReconcile, setShowReconcile] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
   const [showSalary, setShowSalary] = useState(false);
+  const [showAddCredit, setShowAddCredit] = useState(false);
+  const [addAccountKind, setAddAccountKind] = useState<'bank' | 'credit_card' | null>(null);
+  const [showManageCategories, setShowManageCategories] = useState(false);
 
   // The window covers the five months the trend chart draws plus whatever
   // month is being browsed, so stepping outside it triggers a refetch.
@@ -220,6 +226,15 @@ export function Dashboard() {
             <Pressable onPress={() => setShowReconcile(true)} className="rounded-xl border border-border px-3 py-2">
               <Text className="text-xs font-medium text-muted">Reconcile</Text>
             </Pressable>
+            <Pressable
+              onPress={() => setShowAddCredit(true)}
+              disabled={accounts.length === 0}
+              className="flex-row items-center gap-1.5 rounded-xl border border-border px-3 py-2"
+              style={{ opacity: accounts.length === 0 ? 0.4 : 1 }}
+            >
+              <PlusIcon color="#30d158" />
+              <Text className="text-xs font-medium text-ink-secondary">Add Credit</Text>
+            </Pressable>
             <Pressable onPress={() => setShowAddModal(true)} className="flex-row items-center gap-1.5 rounded-xl bg-accent px-4 py-2.5">
               <PlusIcon />
               <Text className="text-sm font-semibold text-white">Add Expense</Text>
@@ -228,25 +243,40 @@ export function Dashboard() {
         </View>
 
         {/* Account Cards */}
-        <View className="flex-row flex-wrap gap-4">
-          {bankAccounts.map(account => (
-            <View key={account.id} className="min-w-[260px] flex-1">
-              <AccountCard
-                account={account}
-                masked={account.role === 'salary' ? !salaryVisible : undefined}
-                onToggleMask={account.role === 'salary' ? () => setSalaryVisible(v => !v) : undefined}
-              />
-            </View>
-          ))}
+        <View className="gap-3">
+          <View className="flex-row items-center justify-between">
+            <Text className="text-xs font-semibold uppercase tracking-widest text-ink-secondary">Accounts</Text>
+            <Pressable onPress={() => setAddAccountKind('bank')} className="h-6 w-6 items-center justify-center rounded-full bg-accent">
+              <PlusIcon size={11} />
+            </Pressable>
+          </View>
+          <View className="flex-row flex-wrap gap-4">
+            {bankAccounts.map(account => (
+              <View key={account.id} className="min-w-[260px] flex-1">
+                <AccountCard
+                  account={account}
+                  masked={account.role === 'salary' ? !salaryVisible : undefined}
+                  onToggleMask={account.role === 'salary' ? () => setSalaryVisible(v => !v) : undefined}
+                />
+              </View>
+            ))}
+          </View>
         </View>
 
         {/* Credit Cards */}
-        {creditCards.length > 0 && (
-          <View className="gap-3">
-            <View className="flex-row items-center justify-between">
+        <View className="gap-3">
+          <View className="flex-row items-center justify-between">
+            <View className="flex-row items-center gap-2">
               <Text className="text-xs font-semibold uppercase tracking-widest text-ink-secondary">Credit Cards</Text>
-              <Badge color="#ff9f0a">{fmt(creditCards.reduce((sum, c) => sum + (c.outstanding ?? 0), 0))} owed</Badge>
+              <Pressable onPress={() => setAddAccountKind('credit_card')} className="h-6 w-6 items-center justify-center rounded-full bg-accent">
+                <PlusIcon size={11} />
+              </Pressable>
             </View>
+            {creditCards.length > 0 && (
+              <Badge color="#ff9f0a">{fmt(creditCards.reduce((sum, c) => sum + (c.outstanding ?? 0), 0))} owed</Badge>
+            )}
+          </View>
+          {creditCards.length > 0 && (
             <View className="flex-row flex-wrap gap-4">
               {creditCards.map(card => (
                 <View key={card.id} className="min-w-[260px] flex-1">
@@ -254,8 +284,8 @@ export function Dashboard() {
                 </View>
               ))}
             </View>
-          </View>
-        )}
+          )}
+        </View>
 
         {/* Spending Trend */}
         <Card className="px-6 py-5">
@@ -284,6 +314,12 @@ export function Dashboard() {
           </View>
 
           {/* Category grid */}
+          <View className="mb-3 flex-row items-center justify-between">
+            <Text className="text-xs font-semibold uppercase tracking-widest text-ink-secondary">Categories</Text>
+            <Pressable onPress={() => setShowManageCategories(true)} className="h-6 w-6 items-center justify-center rounded-full border border-border">
+              <EditIcon />
+            </Pressable>
+          </View>
           <View className="mb-6 flex-row flex-wrap gap-3">
             {catalog.spendable.map(({ name: cat, icon, color }) => {
               const total = categoryTotals[cat];
@@ -411,6 +447,45 @@ export function Dashboard() {
           onClose={() => setShowReconcile(false)}
           onReconcile={async balances => {
             await api.reconcile(balances);
+            await refresh();
+          }}
+        />
+      )}
+      {showAddCredit && accounts.length > 0 && catalog.spendable.length > 0 && (
+        <AddCreditModal
+          accounts={accounts}
+          catalog={catalog}
+          onClose={() => setShowAddCredit(false)}
+          onAdd={async input => {
+            await api.addCredit(input);
+            await refresh();
+          }}
+        />
+      )}
+      {addAccountKind && (
+        <AddAccountModal
+          kind={addAccountKind}
+          onClose={() => setAddAccountKind(null)}
+          onAdd={async input => {
+            await api.addAccount(input);
+            await refresh();
+          }}
+        />
+      )}
+      {showManageCategories && (
+        <ManageCategoriesModal
+          categories={catalog.spendable}
+          onClose={() => setShowManageCategories(false)}
+          onAdd={async input => {
+            await api.addCategory(input);
+            await refresh();
+          }}
+          onEdit={async (id, input) => {
+            await api.updateCategory(id, input);
+            await refresh();
+          }}
+          onDelete={async id => {
+            await api.deleteCategory(id);
             await refresh();
           }}
         />

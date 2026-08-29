@@ -22,25 +22,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import settings  # noqa: E402
 from app.finance_config import finance_config  # noqa: E402
+from app.services.categories import provision_categories  # noqa: E402
 from app.services.provision import provision_accounts  # noqa: E402
 
 
 async def main() -> None:
     conn = await asyncpg.connect(dsn=settings.database_url)
     try:
-        result = await provision_accounts(conn)
+        accounts_result = await provision_accounts(conn)
+        categories_result = await provision_categories(conn)
     finally:
         await conn.close()
 
     by_name = {a.name: a for a in finance_config.accounts}
-    for name in result["created"]:
+    for name in accounts_result["created"]:
         account = by_name[name]
         label = "credit card" if account.kind == "credit_card" else "account"
         print(f"  created {label} {name} at {account.opening_balance}")
-    for name in result["existing"]:
+    for name in accounts_result["existing"]:
         print(f"  {name} already exists, left untouched")
 
-    print(f"  {len(finance_config.categories)} categories served to the dashboard")
+    if categories_result["created"]:
+        print(f"  created categories: {', '.join(categories_result['created'])}")
+    if categories_result["existing"]:
+        print(f"  {len(categories_result['existing'])} categories already exist, left untouched")
 
 
 if __name__ == "__main__":
