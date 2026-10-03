@@ -4,6 +4,12 @@
     "slug": "financial-tracker",
     "scheme": "financial-tracker",
     "version": "1.0.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/14ca6fa8-d9b1-4cd9-a0d1-765f578c4117"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
