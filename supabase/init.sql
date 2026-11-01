@@ -151,3 +151,9 @@ ALTER TABLE category_memory ENABLE ROW LEVEL SECURITY;
 ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
+
+-- 9. Credit limits
+-- What the bank lets a credit card owe, entered when the card is added. Null
+-- for bank accounts and for cards added without one; the API only accepts it
+-- on a credit card (migrations/006_credit_limit.sql).
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(12, 2) CHECK (credit_limit > 0);

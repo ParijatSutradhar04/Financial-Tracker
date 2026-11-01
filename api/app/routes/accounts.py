@@ -26,11 +26,12 @@ async def list_accounts() -> list[AccountOut]:
 async def create_account(body: CreateAccountIn) -> AccountOut:
     async with acquire() as conn:
         row = await conn.fetchrow(
-            f"""INSERT INTO accounts (name, kind, last_reconciled_balance)
-                     VALUES ($1, $2, $3)
+            f"""INSERT INTO accounts (name, kind, last_reconciled_balance, credit_limit)
+                     VALUES ($1, $2, $3, $4)
                  RETURNING {ACCOUNT_COLUMNS}""",
             body.name,
             body.kind,
             body.opening_balance,
+            body.credit_limit,
         )
     return AccountOut(**to_account(row))

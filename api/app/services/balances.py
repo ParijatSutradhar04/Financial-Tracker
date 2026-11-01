@@ -9,7 +9,7 @@ from ..finance_config import role_for_account_name
 from .dates import iso_z
 
 # The columns every read of an account needs.
-ACCOUNT_COLUMNS = "id, name, kind, currency, last_reconciled_balance, reconciled_at"
+ACCOUNT_COLUMNS = "id, name, kind, currency, last_reconciled_balance, reconciled_at, credit_limit"
 
 
 def to_account(row: asyncpg.Record) -> dict:
@@ -30,6 +30,8 @@ def to_account(row: asyncpg.Record) -> dict:
         # negation. What is owed on a card, so the dashboard need not know the
         # sign convention.
         "outstanding": -balance if kind == "credit_card" else None,
+        # What the card may owe; None for a bank account or a card added without one.
+        "credit_limit": float(row["credit_limit"]) if row["credit_limit"] is not None else None,
         "reconciled_at": iso_z(row["reconciled_at"]),
     }
 
