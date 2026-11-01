@@ -17,6 +17,7 @@ import { ManageCategoriesModal } from '../components/modals/ManageCategoriesModa
 import { AddSalaryModal } from '../components/modals/AddSalaryModal';
 import { TransferModal } from '../components/modals/TransferModal';
 import { ReconcileModal } from '../components/modals/ReconcileModal';
+import { ResetModal } from '../components/modals/ResetModal';
 import { ClockIcon, EditIcon, EmptyBoxIcon, PlusIcon, SalaryUpArrowIcon, ArrowRightIcon } from '../components/icons';
 
 export function Dashboard() {
@@ -41,6 +42,7 @@ export function Dashboard() {
   const [showSplitwise, setShowSplitwise] = useState(false);
   const [addAccountKind, setAddAccountKind] = useState<'bank' | 'credit_card' | null>(null);
   const [showManageCategories, setShowManageCategories] = useState(false);
+  const [showReset, setShowReset] = useState(false);
 
   // The window covers the five months the trend chart draws plus whatever
   // month is being browsed, so stepping outside it triggers a refetch.
@@ -201,9 +203,14 @@ export function Dashboard() {
                 </Badge>
               )}
             </View>
-            <Pressable onPress={() => supabase.auth.signOut()}>
-              <Text className="text-xs font-medium text-muted">Sign out</Text>
-            </Pressable>
+            <View className="flex-row items-center gap-4">
+              <Pressable onPress={() => setShowReset(true)} disabled={accounts.length === 0} style={{ opacity: accounts.length === 0 ? 0.4 : 1 }}>
+                <Text className="text-xs font-medium text-red">Reset</Text>
+              </Pressable>
+              <Pressable onPress={() => supabase.auth.signOut()}>
+                <Text className="text-xs font-medium text-muted">Sign out</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View className="flex-row flex-wrap gap-2">
@@ -490,6 +497,16 @@ export function Dashboard() {
           onClose={() => setAddAccountKind(null)}
           onAdd={async input => {
             await api.addAccount(input);
+            await refresh();
+          }}
+        />
+      )}
+      {showReset && (
+        <ResetModal
+          accountCount={accounts.length}
+          onClose={() => setShowReset(false)}
+          onReset={async confirm => {
+            await api.reset(confirm);
             await refresh();
           }}
         />

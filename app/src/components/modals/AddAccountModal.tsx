@@ -1,38 +1,53 @@
 import { useState } from 'react';
 import { Pressable, Text, TextInput, View } from 'react-native';
+import type { AccountInput } from '../../api';
+import { toAccountInput } from '../../accounts';
 import { CloseIcon } from '../icons';
 import { Overlay } from '../Overlay';
 
 interface AddAccountModalProps {
   kind: 'bank' | 'credit_card';
   onClose: () => void;
-  onAdd: (input: { name: string; kind: 'bank' | 'credit_card'; openingBalance: number }) => Promise<void>;
+  onAdd: (input: AccountInput) => Promise<void>;
+}
+
+function AmountField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <View className="gap-1">
+      <Text className="text-xs font-medium uppercase tracking-widest text-ink-secondary">{label}</Text>
+      <View className="flex-row items-center rounded-xl border border-border px-3">
+        <Text className="mr-1.5 font-mono text-sm text-muted">₹</Text>
+        <TextInput
+          className="flex-1 py-3 font-mono text-sm text-ink"
+          placeholder="0.00"
+          value={value}
+          onChangeText={onChange}
+          keyboardType="decimal-pad"
+        />
+      </View>
+    </View>
+  );
 }
 
 export function AddAccountModal({ kind, onClose, onAdd }: AddAccountModalProps) {
   const isCard = kind === 'credit_card';
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
+  const [limit, setLimit] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
   async function submit() {
-    if (!name.trim()) {
-      setError('Enter a name');
-      return;
-    }
-    const n = amount.trim() ? parseFloat(amount) : 0;
-    if (Number.isNaN(n) || n < 0) {
-      setError('Enter a valid amount');
+    const parsed = toAccountInput({ kind, name, amount, limit });
+    if ('error' in parsed) {
+      setError(parsed.error);
       return;
     }
 
     setSaving(true);
     setError('');
     try {
-      // Outstanding is what's owed on the card, stored as a negative balance;
-      // AccountOut derives outstanding = -balance on the way back out.
-      await onAdd({ name: name.trim(), kind, openingBalance: isCard ? -n : n });
+      await onAdd(parsed.input);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not add the account');
@@ -60,23 +75,15 @@ export function AddAccountModal({ kind, onClose, onAdd }: AddAccountModalProps) 
             onChangeText={setName}
             autoFocus
           />
+          {!isCard && (
+            <Text className="text-[11px] text-muted">
+              Add Salary and Transfer act on the accounts named Primary Account and Salary Account.
+            </Text>
+          )}
         </View>
 
-        <View className="gap-1">
-          <Text className="text-xs font-medium uppercase tracking-widest text-ink-secondary">
-            {isCard ? 'Outstanding' : 'Amount available'}
-          </Text>
-          <View className="flex-row items-center rounded-xl border border-border px-3">
-            <Text className="mr-1.5 font-mono text-sm text-muted">₹</Text>
-            <TextInput
-              className="flex-1 py-3 font-mono text-sm text-ink"
-              placeholder="0.00"
-              value={amount}
-              onChangeText={setAmount}
-              keyboardType="decimal-pad"
-            />
-          </View>
-        </View>
+        <AmountField label={isCard ? 'Outstanding' : 'Amount available'} value={amount} onChange={setAmount} />
+        {isCard && <AmountField label="Credit limit (optional)" value={limit} onChange={setLimit} />}
 
         {error && <Text className="-mt-2 text-xs text-red">{error}</Text>}
 
