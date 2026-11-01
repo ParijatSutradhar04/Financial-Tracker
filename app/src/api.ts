@@ -11,8 +11,15 @@ export interface Account {
   balance: number;
   /** What is owed on a card, null for a bank account. */
   outstanding: number | null;
+  /** What the card may owe; null for a bank account or a card added without one. */
+  creditLimit: number | null;
   reconciledAt: string;
 }
+
+export type AccountInput =
+  | { name: string; kind: 'bank'; openingBalance: number }
+  /** openingBalance is minus what is owed. */
+  | { name: string; kind: 'credit_card'; openingBalance: number; creditLimit: number | null };
 
 export interface Category {
   /** Absent for the reserved Transfer/Adjustment/Salary rows, which aren't DB-backed. */
@@ -188,10 +195,17 @@ export const api = {
       body: json(body),
     }),
 
-  addAccount: (body: { name: string; kind: 'bank' | 'credit_card'; openingBalance: number }) =>
+  addAccount: (body: AccountInput) =>
     request<Account>('/accounts', {
       method: 'POST',
       body: json(body),
+    }),
+
+  /** Deletes every account and transaction; categories stay. */
+  reset: (confirm: string) =>
+    request<{ accounts: number; transactions: number }>('/reset', {
+      method: 'POST',
+      body: json({ confirm }),
     }),
 
   addCategory: (body: CategoryInput) =>

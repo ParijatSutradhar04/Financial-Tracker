@@ -107,6 +107,7 @@ class AccountOut(CamelModel):
     currency: str
     balance: float
     outstanding: Optional[float] = None
+    credit_limit: Optional[float] = None
     reconciled_at: str
 
 
@@ -297,11 +298,33 @@ class CreateAccountIn(CamelModel):
     # Negative for a credit card: the frontend sends -outstanding, matching
     # the sign convention AccountOut.outstanding already uses on the way out.
     opening_balance: float
+    credit_limit: Optional[float] = None
 
     @field_validator("opening_balance")
     @classmethod
     def _opening_balance(cls, v: object) -> float:
         return _validate_money(v)
+
+    @field_validator("credit_limit")
+    @classmethod
+    def _credit_limit(cls, v: object) -> Optional[float]:
+        return None if v is None else _validate_positive_money(v)
+
+    @model_validator(mode="after")
+    def _limit_only_on_cards(self) -> "CreateAccountIn":
+        if self.kind != "credit_card" and self.credit_limit is not None:
+            raise ValueError("Only a credit card has a credit limit")
+        return self
+
+
+class ResetIn(CamelModel):
+    # The word the user typed on the confirmation screen; the route checks it.
+    confirm: str = ""
+
+
+class ResetOut(CamelModel):
+    accounts: int
+    transactions: int
 
 
 class CategoryIn(CamelModel):
