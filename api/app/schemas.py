@@ -319,3 +319,106 @@ class CategoryIn(CamelModel):
     @classmethod
     def _color(cls, v: str) -> str:
         return _validate_color(v)
+
+
+# ---------------------------------------------------------------------------
+# Splitwise import
+# ---------------------------------------------------------------------------
+
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+SPLITWISE_MAX_ROWS = 500
+
+
+class SplitwisePreviewIn(CamelModel):
+    csv: str = Field(min_length=1, max_length=1_000_000)
+    member_name: Optional[str] = None
+
+
+class SplitwisePreviewRowOut(CamelModel):
+    fingerprint: str
+    date: str
+    description: str
+    amount: float
+    category: Optional[str] = None
+    confidence: Optional[float] = None
+    source: Optional[Literal["memory", "laya"]] = None
+    already_imported: bool
+
+
+class SplitwiseSkippedOut(CamelModel):
+    line: int
+    description: str
+    reason: str
+
+
+class SplitwiseSettlementOut(CamelModel):
+    line: int
+    date: str
+    description: str
+    amount: float
+
+
+class SplitwisePreviewOut(CamelModel):
+    members: list[str]
+    member_name: Optional[str] = None
+    rows: list[SplitwisePreviewRowOut]
+    skipped: list[SplitwiseSkippedOut]
+    settlements: list[SplitwiseSettlementOut]
+    classifier: Literal["ok", "unavailable", "not_run"]
+
+
+class SplitwiseImportRowIn(CamelModel):
+    fingerprint: str
+    date: str
+    description: str
+    amount: float
+    category: str = Field(min_length=1, max_length=50)
+
+    @field_validator("fingerprint")
+    @classmethod
+    def _fingerprint(cls, v: str) -> str:
+        if not _FINGERPRINT_RE.match(v):
+            raise ValueError("Expected a row fingerprint")
+        return v
+
+    @field_validator("date")
+    @classmethod
+    def _date(cls, v: str) -> str:
+        return _validate_not_in_future(_validate_iso_date(v))
+
+    @field_validator("description")
+    @classmethod
+    def _description(cls, v: str) -> str:
+        return _validate_description(v, required=True)
+
+    @field_validator("amount")
+    @classmethod
+    def _amount(cls, v: object) -> float:
+        return _validate_positive_money(v)
+
+
+class SplitwiseImportIn(CamelModel):
+    account_id: str
+    rows: list[SplitwiseImportRowIn] = Field(min_length=1, max_length=SPLITWISE_MAX_ROWS)
+
+    @field_validator("account_id")
+    @classmethod
+    def _account_id(cls, v: str) -> str:
+        return _validate_uuid(v)
+
+    @model_validator(mode="after")
+    def _unique_fingerprints(self) -> "SplitwiseImportIn":
+        prints = [r.fingerprint for r in self.rows]
+        if len(set(prints)) != len(prints):
+            raise ValueError("Each row may only appear once")
+        return self
+
+
+class SplitwiseImportOut(CamelModel):
+    imported: int
+    skipped_duplicates: int
+    account: AccountOut
+
+
+class ClassifierStatusOut(CamelModel):
+    ready: bool

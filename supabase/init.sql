@@ -120,3 +120,25 @@ CREATE TABLE IF NOT EXISTS categories (
 -- Short description per category, given to the Laya categorizer
 -- (docs/categories.md). Empty means Laya only sees the name.
 ALTER TABLE categories ADD COLUMN IF NOT EXISTS description VARCHAR(200) NOT NULL DEFAULT '';
+
+-- One row per Splitwise expense already imported, keyed on a fingerprint of
+-- date/description/cost/currency/occurrence (api/app/services/splitwise.py),
+-- so re-uploading an overlapping export never records an expense twice.
+CREATE TABLE IF NOT EXISTS splitwise_imports (
+    fingerprint CHAR(64) PRIMARY KEY,
+    transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+
+-- Category the user last confirmed for each description, keyed by
+-- splitwise.memory_key, so repeats skip Laya. A category name, not a foreign
+-- key: names that no longer exist are ignored at lookup time.
+CREATE TABLE IF NOT EXISTS category_memory (
+    description_key TEXT PRIMARY KEY,
+    category VARCHAR(50) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+
+-- No PostgREST access (see section 8).
+ALTER TABLE splitwise_imports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE category_memory ENABLE ROW LEVEL SECURITY;
