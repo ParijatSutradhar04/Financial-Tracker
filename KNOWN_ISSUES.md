@@ -89,3 +89,25 @@ it's just chatty over a long physical distance.
 (server-side timestamp logging or `curl -w '%{time_total}'`) before and
 after the region change; confirm it drops from ~1.5-2s to well under
 200ms.
+
+---
+
+## 2. Splitwise import: per-account balances can drift; don't also add those expenses by hand
+
+**Behaviour, by design:** Import Splitwise records only your share of each
+settled expense, as one transaction on the account you pick. That keeps net
+worth right, but a single account's balance can drift from the bank's if the
+real money moved differently: for example, you paid the whole bill on a card
+and a flatmate paid you back into the bank. Use Reconcile on the affected
+accounts to correct it.
+
+Expenses already entered with Add Expense aren't matched against the export,
+so importing the same expense again counts it twice. Pick one way per
+expense: either add it by hand or import it from Splitwise. Re-importing an
+overlapping export is safe, since rows already imported are skipped.
+
+**Also:** until the Laya categorizer is hosted (`LAYA_SPACE_URL` unset), the
+import works but every category is picked by hand. Choices are remembered
+per description for later imports.
+
+**Status:** known limitation, not planned to change.
