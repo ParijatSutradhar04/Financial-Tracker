@@ -7,12 +7,12 @@ import {
   type SplitwiseImportInput,
   type SplitwiseImportResult,
   type SplitwisePreview,
-  type SplitwisePreviewRow,
   type SplitwiseSkipped,
 } from '../../api';
 import type { Catalog } from '../../utils';
 import { fmt, fmtDate, shortName } from '../../utils';
 import { pickCsvText } from '../../splitwiseFile';
+import { toReviewRows, type ReviewRow } from '../../splitwiseReview';
 import { CloseIcon } from '../icons';
 import { Overlay } from '../Overlay';
 import { Select } from '../Select';
@@ -21,11 +21,6 @@ const MEMBER_KEY = 'splitwise.memberName';
 const LOW_CONFIDENCE = 0.5;
 
 type Step = 'pick' | 'member' | 'review' | 'done';
-
-interface ReviewRow extends SplitwisePreviewRow {
-  include: boolean;
-  chosen: string | null;
-}
 
 interface ImportSplitwiseModalProps {
   accounts: Account[];
@@ -68,14 +63,16 @@ export function ImportSplitwiseModal({ accounts, catalog, onClose, onImport }: I
       const preview = await api.splitwisePreview({ csv: text, memberName: member });
       setMembers(preview.members);
       if (!preview.memberName) {
-        setMemberName(preview.members[0] ?? null);
+        // No preselection: picking someone else records their shares, and
+        // imported rows can't be undone.
+        setMemberName(null);
         setStep('member');
         return;
       }
+      setMemberName(preview.memberName);
       await AsyncStorage.setItem(MEMBER_KEY, preview.memberName);
-      setRows(
-        preview.rows.filter(r => !r.alreadyImported).map(r => ({ ...r, include: true, chosen: r.category })),
-      );
+      // Retry and a member change keep the user's own picks and unticks.
+      setRows(current => toReviewRows(preview.rows, current));
       setAlreadyCount(preview.rows.filter(r => r.alreadyImported).length);
       setSkipped(preview.skipped);
       setSettlements(preview.settlements);
@@ -169,8 +166,8 @@ export function ImportSplitwiseModal({ accounts, catalog, onClose, onImport }: I
             <Text className="text-sm text-ink-secondary">Which person in {fileName || 'this export'} is you?</Text>
             <Select
               value={memberName ?? ''}
-              onChange={setMemberName}
-              options={members.map(m => ({ label: m, value: m }))}
+              onChange={value => setMemberName(value || null)}
+              options={[...(memberName ? [] : [{ label: 'Choose your name', value: '' }]), ...members.map(m => ({ label: m, value: m }))]}
             />
             <Pressable
               onPress={() => runPreview(csv, memberName)}
@@ -196,6 +193,12 @@ export function ImportSplitwiseModal({ accounts, catalog, onClose, onImport }: I
               </View>
             )}
 
+            <View className="flex-row items-center gap-2">
+              <Text className="text-xs text-muted">Importing as {memberName}</Text>
+              <Pressable onPress={() => setStep('member')} disabled={!!busy}>
+                <Text className="text-xs font-semibold text-accent">Change</Text>
+              </Pressable>
+            </View>
             <Text className="text-xs text-muted">
               {rows.length} new expense{rows.length === 1 ? '' : 's'}
               {alreadyCount > 0 ? ` · ${alreadyCount} already imported` : ''}
