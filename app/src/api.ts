@@ -60,6 +60,49 @@ export interface Payday {
   lastSalaryDate: string | null;
 }
 
+export interface SplitwisePreviewRow {
+  fingerprint: string;
+  date: string;
+  description: string;
+  /** The user's share of the expense, which is what gets recorded. */
+  amount: number;
+  /** The suggested category; null when Laya couldn't be reached and nothing was remembered. */
+  category: string | null;
+  /** Laya's confidence; null for remembered rows. */
+  confidence: number | null;
+  /** "memory": the category the user confirmed for this description before. */
+  source: 'memory' | 'laya' | null;
+  alreadyImported: boolean;
+}
+
+export interface SplitwiseSkipped {
+  line: number;
+  description: string;
+  reason: string;
+}
+
+export interface SplitwisePreview {
+  members: string[];
+  /** Null when the member column still needs choosing. */
+  memberName: string | null;
+  rows: SplitwisePreviewRow[];
+  skipped: SplitwiseSkipped[];
+  /** "X paid Y" rows. Not expenses; shown so the user can see the settle-up. */
+  settlements: { line: number; date: string; description: string; amount: number }[];
+  classifier: 'ok' | 'unavailable' | 'not_run';
+}
+
+export interface SplitwiseImportInput {
+  accountId: string;
+  rows: { fingerprint: string; date: string; description: string; amount: number; category: string }[];
+}
+
+export interface SplitwiseImportResult {
+  imported: number;
+  skippedDuplicates: number;
+  account: Account;
+}
+
 // Android/iOS have no origin to be relative to, so they need an absolute API
 // origin. Web is served same-origin with the API (see /vercel.json), so it
 // can stay on a relative path — unless EXPO_PUBLIC_API_URL is set, which lets
@@ -166,5 +209,19 @@ export const api = {
   deleteCategory: (id: string) =>
     request<void>(`/categories/${id}`, {
       method: 'DELETE',
+    }),
+
+  splitwiseClassifierStatus: () => request<{ ready: boolean }>('/splitwise/classifier-status'),
+
+  splitwisePreview: (body: { csv: string; memberName: string | null }) =>
+    request<SplitwisePreview>('/splitwise/preview', {
+      method: 'POST',
+      body: json(body),
+    }),
+
+  splitwiseImport: (body: SplitwiseImportInput) =>
+    request<SplitwiseImportResult>('/splitwise/import', {
+      method: 'POST',
+      body: json(body),
     }),
 };

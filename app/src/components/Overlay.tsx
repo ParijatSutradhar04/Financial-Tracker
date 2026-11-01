@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { Modal, Pressable } from 'react-native';
 
 /** Backdrop + centered sheet shared by all four write-flow modals. */
-export function Overlay({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+export function Overlay({ children, onClose, wide = false }: { children: ReactNode; onClose: () => void; wide?: boolean }) {
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       <Pressable
@@ -10,7 +10,7 @@ export function Overlay({ children, onClose }: { children: ReactNode; onClose: (
         style={{ backgroundColor: 'rgba(0,0,0,0.35)' }}
         onPress={onClose}
       >
-        <Pressable className="w-full max-w-md rounded-2xl bg-white p-6" onPress={() => {}}>
+        <Pressable className={wide ? 'w-full max-w-2xl rounded-2xl bg-white p-6' : 'w-full max-w-md rounded-2xl bg-white p-6'} onPress={() => {}}>
           {children}
         </Pressable>
       </Pressable>
