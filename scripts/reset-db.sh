@@ -4,8 +4,10 @@
 # every account and credit card in api/config/finance.config.json at its
 # opening balance with no transactions recorded against it.
 #
-# Transactions are immutable by design, so recreating the volume is the only way
-# to clear them. A fresh volume also means init.sql runs again, which is what
+# Transactions are immutable by design: row triggers block UPDATE and DELETE.
+# This script clears them by recreating the volume; the app's Reset button
+# (POST /api/reset) clears them by TRUNCATE instead, keeping the schema and the
+# categories. A fresh volume also means init.sql runs again, which is what
 # installs the reconciliation trigger; migrations/ only exists for databases
 # created before a schema change.
 #
