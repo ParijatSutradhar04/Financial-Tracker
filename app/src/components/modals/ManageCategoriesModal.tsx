@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
-import type { Category } from '../../api';
+import type { Category, CategoryInput } from '../../api';
 import { CloseIcon, EditIcon, PlusIcon, TrashIcon } from '../icons';
 import { Overlay } from '../Overlay';
 import { CategoryFormModal } from './CategoryFormModal';
@@ -8,8 +8,8 @@ import { CategoryFormModal } from './CategoryFormModal';
 interface ManageCategoriesModalProps {
   categories: Category[];
   onClose: () => void;
-  onAdd: (input: { name: string; icon: string; color: string }) => Promise<void>;
-  onEdit: (id: string, input: { name: string; icon: string; color: string }) => Promise<void>;
+  onAdd: (input: CategoryInput) => Promise<void>;
+  onEdit: (id: string, input: CategoryInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }
 

@@ -52,5 +52,12 @@ class Settings:
     # local schema-only testing) doesn't crash.
     supabase_url: str | None = os.environ.get("SUPABASE_URL")
 
+    # Private Hugging Face Space running the Laya categorizer, e.g.
+    # https://<user>-laya-categorizer.hf.space, and a fine-grained HF token
+    # with read access to that Space. Unset means Splitwise imports still
+    # work, but every category has to be picked by hand.
+    laya_space_url: str | None = os.environ.get("LAYA_SPACE_URL")
+    laya_hf_token: str | None = os.environ.get("LAYA_HF_TOKEN")
+
 
 settings = Settings()

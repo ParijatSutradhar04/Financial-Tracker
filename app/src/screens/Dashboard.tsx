@@ -11,6 +11,7 @@ import { AccountCard } from '../components/AccountCard';
 import { CreditCardCard } from '../components/CreditCardCard';
 import { AddExpenseModal } from '../components/modals/AddExpenseModal';
 import { AddCreditModal } from '../components/modals/AddCreditModal';
+import { ImportSplitwiseModal } from '../components/modals/ImportSplitwiseModal';
 import { AddAccountModal } from '../components/modals/AddAccountModal';
 import { ManageCategoriesModal } from '../components/modals/ManageCategoriesModal';
 import { AddSalaryModal } from '../components/modals/AddSalaryModal';
@@ -37,6 +38,7 @@ export function Dashboard() {
   const [showTransfer, setShowTransfer] = useState(false);
   const [showSalary, setShowSalary] = useState(false);
   const [showAddCredit, setShowAddCredit] = useState(false);
+  const [showSplitwise, setShowSplitwise] = useState(false);
   const [addAccountKind, setAddAccountKind] = useState<'bank' | 'credit_card' | null>(null);
   const [showManageCategories, setShowManageCategories] = useState(false);
 
@@ -225,6 +227,14 @@ export function Dashboard() {
             </Pressable>
             <Pressable onPress={() => setShowReconcile(true)} className="rounded-xl border border-border px-3 py-2">
               <Text className="text-xs font-medium text-muted">Reconcile</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setShowSplitwise(true)}
+              disabled={accounts.length === 0 || catalog.spendable.length === 0}
+              className="rounded-xl border border-border px-3 py-2"
+              style={{ opacity: accounts.length === 0 || catalog.spendable.length === 0 ? 0.4 : 1 }}
+            >
+              <Text className="text-xs font-medium text-ink-secondary">Import Splitwise</Text>
             </Pressable>
             <Pressable
               onPress={() => setShowAddCredit(true)}
@@ -459,6 +469,18 @@ export function Dashboard() {
           onAdd={async input => {
             await api.addCredit(input);
             await refresh();
+          }}
+        />
+      )}
+      {showSplitwise && accounts.length > 0 && catalog.spendable.length > 0 && (
+        <ImportSplitwiseModal
+          accounts={accounts}
+          catalog={catalog}
+          onClose={() => setShowSplitwise(false)}
+          onImport={async input => {
+            const result = await api.splitwiseImport(input);
+            await refresh();
+            return result;
           }}
         />
       )}

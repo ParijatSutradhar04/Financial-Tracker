@@ -24,11 +24,20 @@ export interface Category {
   spendable: boolean;
   /** Kept out of the dashboard entirely, though still in the ledger. */
   hidden: boolean;
+  /** Plain words for what goes in the category; the Splitwise import's categorizer reads it. */
+  description: string;
 }
 
 /** Accounts, cards, and categories all come from the backend config file. */
 export interface AppConfig {
   categories: Category[];
+}
+
+export interface CategoryInput {
+  name: string;
+  icon: string;
+  color: string;
+  description?: string;
 }
 
 export interface Transaction {
@@ -49,6 +58,49 @@ export interface Payday {
   date: string;
   daysUntil: number;
   lastSalaryDate: string | null;
+}
+
+export interface SplitwisePreviewRow {
+  fingerprint: string;
+  date: string;
+  description: string;
+  /** The user's share of the expense, which is what gets recorded. */
+  amount: number;
+  /** The suggested category; null when Laya couldn't be reached and nothing was remembered. */
+  category: string | null;
+  /** Laya's confidence; null for remembered rows. */
+  confidence: number | null;
+  /** "memory": the category the user confirmed for this description before. */
+  source: 'memory' | 'laya' | null;
+  alreadyImported: boolean;
+}
+
+export interface SplitwiseSkipped {
+  line: number;
+  description: string;
+  reason: string;
+}
+
+export interface SplitwisePreview {
+  members: string[];
+  /** Null when the member column still needs choosing. */
+  memberName: string | null;
+  rows: SplitwisePreviewRow[];
+  skipped: SplitwiseSkipped[];
+  /** "X paid Y" rows. Not expenses; shown so the user can see the settle-up. */
+  settlements: { line: number; date: string; description: string; amount: number }[];
+  classifier: 'ok' | 'unavailable' | 'not_run';
+}
+
+export interface SplitwiseImportInput {
+  accountId: string;
+  rows: { fingerprint: string; date: string; description: string; amount: number; category: string }[];
+}
+
+export interface SplitwiseImportResult {
+  imported: number;
+  skippedDuplicates: number;
+  account: Account;
 }
 
 // Android/iOS have no origin to be relative to, so they need an absolute API
@@ -142,13 +194,13 @@ export const api = {
       body: json(body),
     }),
 
-  addCategory: (body: { name: string; icon: string; color: string }) =>
+  addCategory: (body: CategoryInput) =>
     request<Category>('/categories', {
       method: 'POST',
       body: json(body),
     }),
 
-  updateCategory: (id: string, body: { name: string; icon: string; color: string }) =>
+  updateCategory: (id: string, body: CategoryInput) =>
     request<Category>(`/categories/${id}`, {
       method: 'PATCH',
       body: json(body),
@@ -157,5 +209,19 @@ export const api = {
   deleteCategory: (id: string) =>
     request<void>(`/categories/${id}`, {
       method: 'DELETE',
+    }),
+
+  splitwiseClassifierStatus: () => request<{ ready: boolean }>('/splitwise/classifier-status'),
+
+  splitwisePreview: (body: { csv: string; memberName: string | null }) =>
+    request<SplitwisePreview>('/splitwise/preview', {
+      method: 'POST',
+      body: json(body),
+    }),
+
+  splitwiseImport: (body: SplitwiseImportInput) =>
+    request<SplitwiseImportResult>('/splitwise/import', {
+      method: 'POST',
+      body: json(body),
     }),
 };

@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { Pressable, Text, TextInput, View } from 'react-native';
-import type { Category } from '../../api';
+import type { Category, CategoryInput } from '../../api';
 import { CloseIcon } from '../icons';
 import { Overlay } from '../Overlay';
 
 interface CategoryFormModalProps {
   category?: Category;
   onClose: () => void;
-  onSave: (input: { name: string; icon: string; color: string }) => Promise<void>;
+  onSave: (input: CategoryInput) => Promise<void>;
 }
 
 const DEFAULT_COLOR = '#5b5cf6';
@@ -16,6 +16,7 @@ export function CategoryFormModal({ category, onClose, onSave }: CategoryFormMod
   const [name, setName] = useState(category?.name ?? '');
   const [icon, setIcon] = useState(category?.icon ?? '📦');
   const [color, setColor] = useState(category?.color ?? DEFAULT_COLOR);
+  const [description, setDescription] = useState(category?.description ?? '');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -36,7 +37,7 @@ export function CategoryFormModal({ category, onClose, onSave }: CategoryFormMod
     setSaving(true);
     setError('');
     try {
-      await onSave({ name: name.trim(), icon: icon.trim(), color: color.trim() });
+      await onSave({ name: name.trim(), icon: icon.trim(), color: color.trim(), description: description.trim() });
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save the category');
@@ -91,6 +92,19 @@ export function CategoryFormModal({ category, onClose, onSave }: CategoryFormMod
               />
             </View>
           </View>
+        </View>
+
+        <View className="gap-1">
+          <Text className="text-xs font-medium uppercase tracking-widest text-ink-secondary">What goes in it</Text>
+          <TextInput
+            className="rounded-xl border border-border px-3 py-3 text-sm text-ink"
+            placeholder="e.g. cabs, autos, metro, bus"
+            value={description}
+            onChangeText={setDescription}
+            maxLength={200}
+            multiline
+          />
+          <Text className="text-[10px] text-muted">A few plain words, no brand names. Helps the Splitwise import pick this category.</Text>
         </View>
 
         {error && <Text className="-mt-2 text-xs text-red">{error}</Text>}

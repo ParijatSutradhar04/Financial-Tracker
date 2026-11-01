@@ -4,7 +4,7 @@
 
 **Goal:** Let the user upload a Splitwise CSV export from the app, have every expense description categorized by the Laya model running in a private Hugging Face Gradio Space, review the proposals, and record the user's share of each expense as a debit on the date given in the CSV.
 
-**Architecture:** A new private Hugging Face Space (Gradio SDK, CPU Basic) loads the English Laya checkpoint (`convaiinnovations/laya`) and exposes a JSON `POST /classify` route next to a small Gradio test UI. The FastAPI backend on Vercel gains a `/api/splitwise` router with three endpoints: a classifier wake-up/status probe, a **preview** endpoint (parse CSV, drop already-imported rows, call the Space, return proposals — no DB writes), and an **import** endpoint (bulk-insert confirmed rows as debits in one DB transaction, record fingerprints for dedup, re-sync the balance once). The Expo app gains an "Import Splitwise" button and a review modal.
+**Architecture:** A new private Hugging Face Space (Gradio SDK, CPU Basic) loads the English Laya checkpoint (`convaiinnovations/laya`) and exposes a JSON `POST /classify` route next to a small Gradio test UI. The FastAPI backend on Vercel gains a `/api/splitwise` router with three endpoints: a classifier wake-up/status probe, a **preview** endpoint (parse CSV, drop already-imported rows, reuse remembered categories, call the Space only for descriptions it hasn't seen, return proposals — no DB writes), and an **import** endpoint (bulk-insert confirmed rows as debits in one DB transaction, record fingerprints for dedup, remember each description's confirmed category, re-sync the balance once). The Expo app gains an "Import Splitwise" button and a review modal.
 
 **Tech Stack:** FastAPI + asyncpg + httpx (backend), pytest + pytest-asyncio (new backend tests), Supabase Postgres, Expo SDK 57 / React Native + NativeWind (app), `expo-document-picker` + `expo-file-system` (file reading), Gradio + FastAPI + `laya` + CPU PyTorch (Space).
 
@@ -15,21 +15,32 @@
 ## Design Decisions (the spec)
 
 1. **Trigger:** Manual. The user uploads the CSV in the app whenever they have settled up in Splitwise. No cron.
-2. **Splitwise category is ignored for categorization.** Every non-skipped row's description goes to Laya. The Splitwise `Category` column is read only to recognise settle-up rows (`Payment`), which are skipped.
+2. **Splitwise category is ignored for categorization.** Every non-skipped row's description goes to Laya. The Splitwise `Category` column is read only to recognise settlement rows.
+2a. **Only settled exports are accepted.** The per-member balances summed over every row must be zero, and must match the file's `Total balance` row. Otherwise preview returns 400 with who owes how much, and nothing is categorized or imported.
+2b. **Settlement rows** (`Parijat S. paid Shalin C.`, Category `Payment`) are not expenses. They count towards the settlement check and are listed in the preview for information.
+2c. **Each category has a short description, and Laya is given it.** Categories get a `description` field: plain words for what goes in the category, with no brand names. It is stored in the DB, editable in the existing Add/Edit Category form, and seeded from `finance.config.json`. Laya scores each expense against these descriptions, falling back to `Spending on <name>` when a description is empty. The agreed wording for every category is in `docs/categories.md`. Existing clients that edit a category without sending a description keep the stored one.
 3. **Amount recorded = the user's share**, derived from the user's member column (the column holds the *net balance change* for that person, not their share):
    - net `< 0` → someone else paid → share = `-net`
    - net `> 0` → the user paid → share = `Cost - net` (assumes the user was the only payer)
    - net `= 0` → skipped ("your balance didn't change")
+   - share `= 0` (the user paid the whole cost for others) → skipped
 4. **Which column is "me":** chosen once in the modal from the CSV's member columns, remembered on the device (AsyncStorage key `splitwise.memberName`).
 5. **Account:** one account per import, picked in the review step (defaults to the `primary` role account). All rows become `debit` transactions on it.
 6. **Date:** the CSV date. Back-dated rows land at local midnight in `APP_TIMEZONE`; a row dated today gets the insert clock time — the same rule `insert_transaction` uses today. Future-dated rows are skipped (the reconciliation trigger would double count them).
 7. **Dedup:** each row gets a SHA-256 fingerprint of `date | normalised description | cost | currency | occurrence-index-within-file`. Imported fingerprints are stored in a new `splitwise_imports` table. Re-uploading an overlapping export imports only new rows. The user's share is *not* part of the fingerprint, so editing a split in Splitwise after import does not create a duplicate.
+7a. **Category memory (cache in front of Laya):** the user is asked about a description once, and the answer is reused after that. It saves Laya calls, and it fixes what Laya can't learn, such as local brands like Furlenco. Laya got Furlenco wrong under every wording tested (`docs/categories.md`).
+   - **Key:** `memory_key(description)`. It lowercases, drops every token that contains a digit, turns punctuation into spaces and collapses whitespace. So `Grocery Ratnadeep 22/08` and `grocery ratnadeep 6/9` share the key `grocery ratnadeep`, and `Maintenance Sept26` becomes `maintenance`. If nothing is left (`22/08`), the row is never remembered and always goes to Laya.
+   - **Stored:** in a new `category_memory` table (key → category name). On import, every imported row writes its **final** category, whether the user accepted Laya's proposal or changed it, because importing is the confirmation. A later import overwrites the earlier answer, and within one import the last row wins.
+   - **Used:** at preview, rows whose key is remembered get that category with `source: "memory"` and `confidence: null`, and are never sent to Laya. A remembered category is used only if it is still a spendable category; otherwise the row goes to Laya. Rows that miss go to Laya once per distinct key, so a file with five `Ratnadeep` rows costs one prediction. They come back with `source: "laya"`.
+   - **The classifier field:** it reports only the Laya call. It is `"not_run"` when every fresh row was remembered.
+   - **In the app:** remembered rows show a small "Remembered" tag instead of a confidence check. The user can still change them, and the change is remembered on import.
+   - Only descriptions and category names are stored or sent. Amounts, dates and names never are.
 8. **Review before write:** the preview never writes. The user can change any category, untick any row, and must fill in categories Laya couldn't provide.
 9. **Laya unavailable** (Space asleep past the timeout, misconfigured, error): preview still succeeds with `category: null` on every row and `classifier: "unavailable"`; the UI shows a banner with Retry and lets the user categorize manually.
 10. **Low confidence:** rows with Laya `answer_confidence < 0.5` are highlighted "Check this one". Not auto-rejected.
 11. **Limits:** max 500 rows per preview/import; Laya called in chunks of 64; overall Laya deadline 150 s (fits Vercel Hobby's 300 s function limit).
 12. **Security:** the Space is private. The backend authenticates to it with a Hugging Face fine-grained read token (`LAYA_HF_TOKEN`). The new API routes sit behind the existing Supabase JWT auth like every other route.
-13. **Everything existing stays unchanged.** No existing route, service function, table, trigger, or modal changes behavior. The only edits to existing files are additive (new router registration, new settings fields, new API client methods, a new dashboard button, an optional `wide` prop on `Overlay` that defaults to the current width).
+13. **Everything existing stays unchanged.** No existing route, service function, table, trigger, or modal changes behavior. The only edits to existing files are additive (new router registration, new settings fields, new API client methods, a new dashboard button, an optional `wide` prop on `Overlay` that defaults to the current width, and the optional category `description` field from 2c).
 
 ### Known limitation (tell the user, don't "fix")
 Recording only the user's share on one chosen account keeps *net worth* right, but per-account balances can drift if the real cash flow was different (e.g. you paid the full bill on a card and were paid back to the bank). The existing Reconcile flow corrects that. If the user also records Splitwise expenses manually via Add Expense, importing will double count them.
@@ -46,41 +57,44 @@ Recording only the user's share on one chosen account keeps *net worth* right, b
 - Schema changes go in a new numbered migration (`migrations/004_splitwise_imports.sql`) **and** are appended to `supabase/init.sql` (the root `init.sql` is a symlink to it).
 - The Expo app is SDK 57. Per `app/AGENTS.md`, check https://docs.expo.dev/versions/v57.0.0/ for `expo-document-picker` and `expo-file-system` before writing code that uses them; adjust the import if the documented API differs from this plan.
 - Install Expo packages with `npx expo install`, never plain `npm install`, so versions match SDK 57.
-- **Before Task 1:** the working tree has uncommitted user changes in `app/app.json`, `app/eas.json`, `app/package.json`, `app/package-lock.json`. Ask the user to commit or stash them first. Do not commit them as part of this work.
 - Laya model: English checkpoint only, loaded with `laya.load("convaiinnovations/laya")` (bypasses the language router, which can misroute short text).
 
 ## Review Focus
 
-1. **Uploading the same or an overlapping export twice** → previously imported rows show as "already imported" and are never inserted again, even if the import endpoint is called directly with them. Pinned in Task 4 (`test_reimport_skips_duplicates`) and Task 2 (`test_fingerprint_stable_across_files`).
-2. **The Space is asleep or slow** (first upload after days of inactivity) → preview returns within the deadline with `classifier: "unavailable"` instead of a 500 or a Vercel timeout. Pinned in Task 3 (`test_timeout_raises_unavailable`) and Task 4 (`test_preview_when_categorizer_down`).
+1. **Uploading the same or an overlapping export twice** → previously imported rows show as "already imported" and are never inserted again, even if the import endpoint is called directly with them. Pinned in Task 5 (`test_reimport_skips_duplicates`) and Task 2 (`test_fingerprint_stable_across_files`).
+2. **The Space is asleep or slow** (first upload after days of inactivity) → preview returns within the deadline with `classifier: "unavailable"` instead of a 500 or a Vercel timeout. Pinned in Task 3 (`test_timeout_raises_unavailable`) and Task 5 (`test_preview_when_categorizer_down`).
 3. **A CSV that was opened and re-saved in Excel** (BOM added, dates reformatted to `14/09/2026`) → BOM tolerated; non-ISO dates skipped with a readable reason rather than crashing or importing on a wrong date. Pinned in Task 2 (`test_bom_is_tolerated`, `test_non_iso_date_is_skipped`).
 4. **Two genuinely identical expenses on the same day** (two coffees, same price) → both imported, and still deduped correctly on re-upload. Pinned in Task 2 (`test_identical_rows_get_distinct_fingerprints`).
-5. **A category renamed or deleted between preview and import** → import is rejected with a message naming the bad category, and nothing is written. Pinned in Task 4 (`test_import_rejects_unknown_category_atomically`).
+5. **An unsettled export, or one edited after export** → rejected at preview with a message saying who owes what, before any Laya call. Pinned in Task 2 (`test_unsettled_export_reports_who_owes`, `test_total_row_that_does_not_add_up_is_rejected`) and Task 5 (`test_preview_rejects_unsettled_export`).
+6. **A category renamed or deleted between preview and import** → import is rejected with a message naming the bad category, and nothing is written. Pinned in Task 5 (`test_import_rejects_unknown_category_atomically`).
+7. **The user corrects a category, then imports next month's export** → the corrected category comes back for the same description (even with a different date suffix) without asking Laya. A remembered category that was deleted since is ignored. Pinned in Task 2 (`test_memory_key_*`) and Task 5 (`test_memory_hit_skips_laya`, `test_import_remembers_corrected_category`, `test_memory_ignores_deleted_category`).
 
 ---
 
 ## File Structure
 
 **Hugging Face Space (new directory, pushed to its own HF git remote):**
-- `laya_space/classifier.py` — pure function turning descriptions + category names into Laya questions and mapping results. No Laya import, so it is testable without the model.
+- `laya_space/classifier.py` — pure function turning descriptions + categories (name and description) into Laya questions and mapping results. No Laya import, so it is testable without the model.
 - `laya_space/app.py` — loads the model, FastAPI routes `/healthz` and `/classify`, Gradio test UI, mounted together.
 - `laya_space/requirements.txt` — Space dependencies (CPU torch).
 - `laya_space/README.md` — HF Space front-matter config.
 - `laya_space/tests/test_classifier.py` — unit tests with a fake agent.
 
 **Backend:**
-- Create `migrations/004_splitwise_imports.sql`; modify `supabase/init.sql` (append).
-- Create `api/app/services/splitwise.py` — CSV parsing, share calculation, fingerprints. Pure.
+- Create `migrations/004_splitwise_imports.sql` (categories `description` column, then the import tables); modify `supabase/init.sql` (append).
+- Modify `api/app/services/categories.py`, `api/app/routes/categories.py`, `api/app/finance_config.py` — category descriptions.
+- Create `api/app/services/splitwise.py` — CSV parsing, share calculation, fingerprints, category-memory keys. Pure.
 - Create `api/app/services/categorizer.py` — HTTP client for the Space.
-- Create `api/app/services/splitwise_import.py` — DB reads/writes for dedup and bulk insert.
+- Create `api/app/services/splitwise_import.py` — DB reads/writes for dedup, category memory and bulk insert.
 - Create `api/app/routes/splitwise.py` — the three endpoints.
 - Modify `api/app/schemas.py` (append models), `api/app/config.py` (two settings), `api/app/main.py` (register router), `api/requirements.txt` (`httpx`), `api/.env.example` (two vars).
-- Create `api/requirements-dev.txt`, `api/pytest.ini`, `api/tests/conftest.py`, `api/tests/test_splitwise_parser.py`, `api/tests/test_categorizer.py`, `api/tests/test_splitwise_routes.py`.
+- Create `api/requirements-dev.txt`, `api/pytest.ini`, `api/tests/conftest.py`, `api/tests/test_splitwise_parser.py`, `api/tests/test_categorizer.py`, `api/tests/test_category_descriptions.py`, `api/tests/test_splitwise_routes.py`.
 
 **App:**
 - Create `app/src/splitwiseFile.ts` — pick a CSV and read its text on web and native.
 - Create `app/src/components/modals/ImportSplitwiseModal.tsx`.
-- Modify `app/src/api.ts` (types + three methods), `app/src/components/Overlay.tsx` (optional `wide` prop), `app/src/screens/Dashboard.tsx` (button + modal).
+- Modify `app/src/components/modals/CategoryFormModal.tsx` and `ManageCategoriesModal.tsx` (description field).
+- Modify `app/src/api.ts` (category `description`, import types + three methods), `app/src/components/Overlay.tsx` (optional `wide` prop), `app/src/screens/Dashboard.tsx` (button + modal).
 
 ---
 
@@ -93,8 +107,10 @@ Recording only the user's share on one chosen account keeps *net worth* right, b
 **Interfaces:**
 - Produces (HTTP, consumed by Task 3):
   - `GET /healthz` → `200 {"status": "ok"}`
-  - `POST /classify` body `{"descriptions": string[1..64], "categories": string[1..50]}` → `200 {"results": [{"category": string, "confidence": number}]}` in input order, each `category` ∈ `categories`.
-- Produces (Python): `classify(agent, descriptions: list[str], categories: list[str], batch_size: int = 32) -> list[dict]`
+  - `POST /classify` body `{"descriptions": string[1..64], "categories": [{"name": string, "description": string}][1..50]}` → `200 {"results": [{"category": string, "confidence": number}]}` in input order, each `category` is one of the category names. `description` may be empty or omitted.
+- Produces (Python): `classify(agent, descriptions: list[str], categories: list[dict], batch_size: int = 32) -> list[dict]`, where each category is `{"name": str, "description": str}`.
+
+**Category descriptions are what Laya scores against** (Design Decision 2c). The criterion for each category is its description, such as `"rent, society maintenance, move-in charges, monthly furniture and appliance rental"`. If the description is empty, the criterion falls back to `"Spending on <name>"`. In the 2026-10-04 test on the real export, short plain descriptions got 39 of 54 right, against 18 of 54 for names alone (`docs/categories.md`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -121,18 +137,25 @@ class FakeAgent:
         ]
 
 
-def test_build_questions_uses_every_category_as_a_choice():
-    q = build_questions(["Food", "Travel"])
+CATS = [
+    {"name": "Eating Out", "description": "restaurants, food delivery, snacks"},
+    {"name": "Travel", "description": ""},
+]
+
+
+def test_build_questions_uses_descriptions_as_criteria():
+    q = build_questions(CATS)
     assert q["category"]["type"] == "choice"
-    assert list(q["category"]["criteria"].keys()) == ["Food", "Travel"]
-    assert q["category"]["criteria"]["Food"] == "Spending on food"
+    assert list(q["category"]["criteria"].keys()) == ["Eating Out", "Travel"]
+    assert q["category"]["criteria"]["Eating Out"] == "restaurants, food delivery, snacks"
+    assert q["category"]["criteria"]["Travel"] == "Spending on travel"  # no description: fall back to the name
 
 
 def test_classify_maps_results_in_order():
-    agent = FakeAgent([("Food", 0.91), ("Travel", 0.42)])
-    out = classify(agent, ["Dinner at Toit", "Cab to airport"], ["Food", "Travel"])
+    agent = FakeAgent([("Eating Out", 0.91), ("Travel", 0.42)])
+    out = classify(agent, ["Dinner at Toit", "Cab to airport"], CATS)
     assert out == [
-        {"category": "Food", "confidence": 0.91},
+        {"category": "Eating Out", "confidence": 0.91},
         {"category": "Travel", "confidence": 0.42},
     ]
     states, _, batch_size, sort_by_length = agent.calls[0]
@@ -142,14 +165,14 @@ def test_classify_maps_results_in_order():
 
 def test_classify_empty_input_skips_model():
     agent = FakeAgent([])
-    assert classify(agent, [], ["Food"]) == []
+    assert classify(agent, [], CATS) == []
     assert agent.calls == []
 
 
 def test_classify_rejects_label_outside_categories():
     agent = FakeAgent([("Groceries", 0.9)])
     with pytest.raises(ValueError, match="Groceries"):
-        classify(agent, ["Milk"], ["Food"])
+        classify(agent, ["Milk"], CATS)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -171,30 +194,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 `laya_space/classifier.py`:
 
 ```python
-"""Turns expense descriptions + the user's category names into one Laya
-`choice` question and maps the answers back. Kept free of any `laya` import
-so it can be tested with a fake agent."""
+"""Turns expense descriptions + the user's categories into one Laya `choice`
+question and maps the answers back. Kept free of any `laya` import so it can
+be tested with a fake agent.
+
+Each category is {"name", "description"}. Laya scores a description against
+each category's criterion, so a short plain description ("cabs, autos,
+metro, bus") works far better than the bare name (docs/categories.md)."""
 
 from __future__ import annotations
 
 QUESTION_ID = "category"
 
 
-def build_questions(categories: list[str]) -> dict:
+def _criterion(category: dict) -> str:
+    return (category.get("description") or "").strip() or f"Spending on {category['name'].lower()}"
+
+
+def build_questions(categories: list[dict]) -> dict:
     return {
         QUESTION_ID: {
             "type": "choice",
             "instructions": "Which spending category does this personal expense belong to?",
-            "criteria": {name: f"Spending on {name.lower()}" for name in categories},
+            "criteria": {c["name"]: _criterion(c) for c in categories},
         }
     }
 
 
-def classify(agent, descriptions: list[str], categories: list[str], batch_size: int = 32) -> list[dict]:
+def classify(agent, descriptions: list[str], categories: list[dict], batch_size: int = 32) -> list[dict]:
     if not descriptions:
         return []
 
-    allowed = set(categories)
+    allowed = {c["name"] for c in categories}
     results = agent.predict_batch(
         [{"body": d} for d in descriptions],
         build_questions(categories),
@@ -242,9 +273,14 @@ agent = laya.load("convaiinnovations/laya")
 api = FastAPI()
 
 
+class CategoryChoice(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    description: str = Field(default="", max_length=200)
+
+
 class ClassifyIn(BaseModel):
     descriptions: list[str] = Field(min_length=1, max_length=64)
-    categories: list[str] = Field(min_length=1, max_length=50)
+    categories: list[CategoryChoice] = Field(min_length=1, max_length=50)
 
 
 @api.get("/healthz")
@@ -256,11 +292,16 @@ def healthz() -> dict:
 @api.post("/classify")
 def classify_route(body: ClassifyIn) -> dict:
     descriptions = [d.strip()[:500] for d in body.descriptions]
-    return {"results": classify(agent, descriptions, body.categories)}
+    return {"results": classify(agent, descriptions, [c.model_dump() for c in body.categories])}
 
 
 def try_it(description: str, categories: str) -> str:
-    cats = [c.strip() for c in categories.split(",") if c.strip()]
+    # One category per line, as "Name: description" or just "Name".
+    cats = []
+    for line in categories.splitlines():
+        name, _, desc = line.partition(":")
+        if name.strip():
+            cats.append({"name": name.strip(), "description": desc.strip()})
     if not description.strip() or not cats:
         return "Enter a description and at least one category."
     [result] = classify(agent, [description], cats)
@@ -271,7 +312,16 @@ demo = gr.Interface(
     fn=try_it,
     inputs=[
         gr.Textbox(label="Expense description", value="Dinner at Toit"),
-        gr.Textbox(label="Categories (comma separated)", value="Food, Travel, Groceries, Shopping"),
+        gr.Textbox(
+            label="Categories (one per line, Name: description)",
+            lines=4,
+            value=(
+                "Groceries: food and ingredients bought to cook at home\n"
+                "Eating Out: restaurants, food delivery, ready-to-eat food, snacks, sweets\n"
+                "Commute: cabs, autos, metro, bus\n"
+                "Shopping & Personal Care: clothes, shoes, gadgets, haircut, toiletries"
+            ),
+        ),
     ],
     outputs=gr.Textbox(label="Prediction"),
     title="Laya categorizer",
@@ -310,7 +360,7 @@ pinned: false
 
 Private Space used by the Financial Tracker API to categorize Splitwise
 expenses with the English Laya checkpoint (`convaiinnovations/laya`).
-`POST /classify` with `{"descriptions": [...], "categories": [...]}`.
+`POST /classify` with `{"descriptions": [...], "categories": [{"name": ..., "description": ...}]}`.
 ```
 
 - [ ] **Step 6: Smoke-test the real model locally (confirms the result keys)**
@@ -322,11 +372,13 @@ cd laya_space
 # in another terminal:
 curl -s localhost:7860/healthz
 curl -s -X POST localhost:7860/classify -H 'content-type: application/json' \
-  -d '{"descriptions":["Dinner at Toit","Uber to airport","BigBasket order"],"categories":["Food","Travel","Groceries","Shopping"]}'
+  -d '{"descriptions":["Dinner at Toit","Uber to office","Eggs and onions"],"categories":[{"name":"Eating Out","description":"restaurants, food delivery, ready-to-eat food, snacks, sweets"},{"name":"Commute","description":"cabs, autos, metro, bus"},{"name":"Groceries","description":"food and ingredients bought to cook at home"},{"name":"Others"}]}'
 ```
 Expected: `{"status":"ok"}`, then three results whose categories look sensible. If the call fails with a `KeyError`, print one raw `agent.predict_batch` result, fix the keys in `classifier.py` (and the `FakeAgent` in the test to match), and re-run Steps 4 and 6.
 
-- [ ] **Step 7: Create and deploy the private Space**
+- [ ] **Step 7: Create and deploy the private Space (DEFERRED)**
+
+> **Deferred by the user on 2026-10-04. Skip this step.** Hugging Face now requires a PRO account for Gradio and Docker Spaces; a free account gets HTTP 402. Hosting is still undecided. Nothing else in the plan waits on it: all tests fake the Space. With `LAYA_SPACE_URL` unset, preview returns `classifier: "unavailable"`, and the user picks categories by hand. The category memory still fills from those choices. When hosting is decided, update this step and then do Task 5 Step 8 and Task 7 Step 2. The steps below are the original Hugging Face instructions.
 
 1. On huggingface.co: New Space → name `laya-categorizer` → SDK **Gradio** → hardware **CPU basic (free)** → visibility **Private**. If the free account cannot create it, stop and tell the user.
 2. Clone the Space's own git repo outside this project, copy the files in, and push. This avoids nesting a git repo inside this one:
@@ -363,12 +415,27 @@ git commit -m "feat: add Laya categorizer Hugging Face Space"
   - `class SplitwiseCsvError(ValueError)`
   - `@dataclass(frozen=True) class ParsedRow: fingerprint: str; date: str; description: str; amount: float; cost: float`
   - `@dataclass(frozen=True) class SkippedRow: line: int; description: str; reason: str`
-  - `@dataclass(frozen=True) class ParsedCsv: members: list[str]; member_name: str | None; rows: list[ParsedRow]; skipped: list[SkippedRow]`
-  - `parse_splitwise_csv(text: str, member_name: str | None, today: str) -> ParsedCsv` — when `member_name` is `None` or not a member column, returns `members` with `member_name=None` and empty `rows`/`skipped`.
+  - `@dataclass(frozen=True) class Settlement: line: int; date: str; description: str; amount: float; currency: str`
+  - `@dataclass(frozen=True) class Balance: member: str; currency: str; amount: float` (positive = is owed, negative = owes)
+  - `@dataclass(frozen=True) class ParsedCsv: members: list[str]; member_name: str | None; rows: list[ParsedRow]; skipped: list[SkippedRow]; settlements: list[Settlement]; unsettled: list[Balance]` with property `settled -> bool` (`True` when `unsettled` is empty)
+  - `parse_splitwise_csv(text: str, member_name: str | None, today: str) -> ParsedCsv`. When `member_name` is `None` or not a member column, it returns `member_name=None` and empty `rows`/`skipped`, but `members`, `settlements` and `unsettled` are always filled in, so the caller can reject an unsettled file before asking who the user is.
+  - `unsettled_message(unsettled: list[Balance]) -> str`
+  - `memory_key(description: str) -> str`: the category-memory key (Design Decision 7a). An empty string means "don't remember this row".
 
-- [ ] **Step 0: Confirm the export format against a real file**
+**Export format, confirmed against the user's real export on 2026-10-03** (`~/Downloads/flat_2026-10-03_export.csv`, two members, 63 rows; never commit a real export, it contains names and money):
+- Header `Date,Description,Category,Cost,Currency,<Full Name>,<Full Name>`, no BOM, followed by a **blank line**.
+- Dates are `YYYY-MM-DD`. Descriptions often have **trailing spaces** and can be **quoted with commas inside** (`"Garam Masala, Chole Masala and Curd"`).
+- Each member column is that person's net balance change for the row (paid minus owed). Every row's member columns sum to zero.
+- **Settlement rows** have Category `Payment` and a description like `Parijat S. paid Shalin C.` Names there are abbreviated, unlike the header, so never match them against member names. They move balances but are not expenses.
+- The file ends with a blank line and `<date>,Total balance, , ,INR,<balance>,<balance>`. The per-member sums of all rows matched this row exactly, to the paisa.
+- One real row had the user paying the whole cost for the other person (`Cost 70.00`, user's net `+70.00`), so the user's share is zero.
+- The sample was **not settled** (the user owes 4,927.07). A settled export has `0.00` (possibly `-0.00`) for every member in the Total balance row.
 
-Ask the user for a real Splitwise export (Splitwise → group or friend → Export as spreadsheet), or use one they put at `api/tests/fixtures/real_export.csv` (do **not** commit a real file; it contains names and money). Check that: the header is `Date,Description,Category,Cost,Currency,<Person>,<Person>...`; dates are `YYYY-MM-DD`; settle-ups have Category `Payment`; the file ends with a `Total balance` row; a member column equals that person's net balance change (paid minus owed). If any of these differ, update `SAMPLE` in the test and the parser to match before continuing, and note the difference in the commit message.
+**Settlement rules (from the user, 2026-10-03):**
+- The import is only allowed for a **settled** export: every member's balance, summed over all rows of a currency, must be zero. Settlement rows, future-dated rows and rows skipped as expenses all count towards the balance, because Splitwise counts them.
+- The Total balance row, when present, must equal those sums. If it doesn't, the file was edited or truncated and is rejected with `SplitwiseCsvError`.
+- Settlement rows are recognised by Category `Payment`, or by a blank Category plus a description of the form `<someone> paid <someone>`. They are returned in `settlements` for display and never become expenses or skipped rows.
+- A row whose balance can't be read as a number makes the whole file an error, because settlement can't be verified.
 
 - [ ] **Step 1: Set up the test harness**
 
@@ -405,34 +472,59 @@ Install: `cd api && .venv/bin/pip install -r requirements-dev.txt` (create `api/
 
 - [ ] **Step 2: Write the failing tests**
 
-`api/tests/test_splitwise_parser.py`:
+`api/tests/test_splitwise_parser.py`. The sample is anonymised but laid out exactly like the real export: blank line after the header, a trailing space, a quoted description with a comma, abbreviated names in the settlement row, and a computed Total balance row.
 
 ```python
+import csv
+from decimal import Decimal
+
 import pytest
 
-from app.services.splitwise import SplitwiseCsvError, parse_splitwise_csv
+from app.services.splitwise import (
+    Balance,
+    Settlement,
+    SplitwiseCsvError,
+    memory_key,
+    parse_splitwise_csv,
+    unsettled_message,
+)
 
 TODAY = "2026-10-03"
+ME = "Parijat Sutradhar"
+HEADER = "Date,Description,Category,Cost,Currency,Parijat Sutradhar,Asha Kumar"
+ROWS = [
+    "2026-09-01,Dinner at Toit ,Dining out,1200.00,INR,600.00,-600.00",  # I paid
+    "2026-09-02,Cab to airport,Taxi,900.00,INR,-450.00,450.00",  # Asha paid
+    '2026-09-03,"Garam masala, curd",Groceries,90.00,INR,90.00,-90.00',  # I paid all of it for Asha
+    "2026-09-04,Movie tickets,Movies,500.00,INR,0.00,0.00",  # not involved
+    "2026-09-05,Asha K. paid Parijat S.,Payment,240.00,INR,-240.00,240.00",  # settles the 240 Asha owed
+]
 
-SAMPLE = """Date,Description,Category,Cost,Currency,Parijat S,Asha K
-2026-09-01,Dinner at Toit,Dining out,1200.00,INR,600.00,-600.00
-2026-09-02,Cab to airport,Taxi,900.00,INR,-450.00,450.00
-2026-09-03,Asha K paid Parijat S,Payment,600.00,INR,-600.00,600.00
-2026-09-04,Movie tickets,Movies,500.00,INR,0.00,0.00
 
-2026-10-03,Total balance, , ,INR,-450.00,450.00
-"""
+def make_csv(rows=ROWS, total=True):
+    """Lays rows out like a real export, with one Total balance row per currency."""
+    sums: dict[str, list[Decimal]] = {}
+    for cells in csv.reader(rows):
+        per = sums.setdefault(cells[4], [Decimal(0), Decimal(0)])
+        per[0] += Decimal(cells[5])
+        per[1] += Decimal(cells[6])
+    totals = [f"2026-10-03,Total balance, , ,{cur},{a:.2f},{b:.2f}" for cur, (a, b) in sums.items()] if total else []
+    return "\n".join([HEADER, "", *rows, "", *totals]) + "\n"
 
 
-def parse(text=SAMPLE, member="Parijat S", today=TODAY):
+SAMPLE = make_csv()  # settled: both balances are 0.00
+
+
+def parse(text=SAMPLE, member=ME, today=TODAY):
     return parse_splitwise_csv(text, member, today)
 
 
-def test_members_listed_and_no_rows_without_member():
+def test_members_and_settlement_known_without_member():
     result = parse(member=None)
-    assert result.members == ["Parijat S", "Asha K"]
+    assert result.members == ["Parijat Sutradhar", "Asha Kumar"]
     assert result.member_name is None
     assert result.rows == [] and result.skipped == []
+    assert result.settled and len(result.settlements) == 1
 
 
 def test_unknown_member_behaves_like_no_member():
@@ -443,25 +535,72 @@ def test_unknown_member_behaves_like_no_member():
 def test_share_when_i_paid_and_when_someone_else_paid():
     rows = parse().rows
     assert [(r.date, r.description, r.amount) for r in rows] == [
-        ("2026-09-01", "Dinner at Toit", 600.0),  # I paid 1200, net +600 -> share 600
+        ("2026-09-01", "Dinner at Toit", 600.0),  # trailing space stripped; paid 1200, net +600 -> share 600
         ("2026-09-02", "Cab to airport", 450.0),  # Asha paid, my net -450 -> share 450
     ]
     assert rows[0].cost == 1200.0
 
 
-def test_payment_and_zero_balance_rows_skipped_with_reasons():
-    skipped = parse().skipped
-    assert [(s.description, s.reason) for s in skipped] == [
-        ("Asha K paid Parijat S", "Settle-up payment"),
-        ("Movie tickets", "Your balance didn't change, so you weren't part of this expense"),
-    ]
-    assert skipped[0].line == 4
-
-
-def test_total_balance_and_blank_lines_are_ignored_silently():
+def test_settlement_rows_are_returned_separately_not_as_expenses():
     result = parse()
-    assert all("Total balance" not in s.description for s in result.skipped)
-    assert len(result.rows) + len(result.skipped) == 4
+    assert result.settlements == [
+        Settlement(line=7, date="2026-09-05", description="Asha K. paid Parijat S.", amount=240.0, currency="INR")
+    ]
+    assert all("paid" not in s.description for s in result.skipped)
+
+
+def test_settlement_recognised_by_description_when_category_is_blank():
+    rows = [*ROWS[:-1], "2026-09-05,Asha K. paid Parijat S.,,240.00,INR,-240.00,240.00"]
+    result = parse(make_csv(rows))
+    assert len(result.settlements) == 1 and len(result.rows) == 2
+
+
+def test_rows_with_no_share_for_me_are_skipped_with_reasons():
+    skipped = parse().skipped
+    assert [(s.line, s.description, s.reason) for s in skipped] == [
+        (5, "Garam masala, curd", "You paid the whole amount for others, so none of it is your expense"),
+        (6, "Movie tickets", "Your balance didn't change, so you weren't part of this expense"),
+    ]
+
+
+def test_settled_export():
+    result = parse()
+    assert result.settled and result.unsettled == []
+
+
+def test_unsettled_export_reports_who_owes():
+    result = parse(make_csv(ROWS[:-1]))  # drop the settlement row
+    assert not result.settled
+    assert result.unsettled == [
+        Balance(member="Parijat Sutradhar", currency="INR", amount=240.0),
+        Balance(member="Asha Kumar", currency="INR", amount=-240.0),
+    ]
+    assert unsettled_message(result.unsettled) == (
+        "This export isn't settled yet: Asha Kumar owes INR 240.00. "
+        "Settle up in Splitwise, export again and upload the new file."
+    )
+    assert not parse(make_csv(ROWS[:-1]), member=None).settled
+
+
+def test_unsettled_without_total_row_is_still_detected():
+    assert not parse(make_csv(ROWS[:-1], total=False)).settled
+
+
+def test_negative_zero_total_counts_as_settled():
+    text = SAMPLE.replace("Total balance, , ,INR,0.00,0.00", "Total balance, , ,INR,-0.00,0.00")
+    assert parse(text).settled
+
+
+def test_total_row_that_does_not_add_up_is_rejected():
+    text = SAMPLE.replace("Total balance, , ,INR,0.00,0.00", "Total balance, , ,INR,-10.00,10.00")
+    with pytest.raises(SplitwiseCsvError, match="Total balance"):
+        parse(text)
+
+
+def test_unreadable_balance_is_an_error():
+    text = SAMPLE.replace("INR,-450.00,450.00", "INR,-450.00,abc")
+    with pytest.raises(SplitwiseCsvError, match="isn't a number"):
+        parse(text)
 
 
 def test_bom_is_tolerated():
@@ -476,17 +615,15 @@ def test_non_iso_date_is_skipped():
 
 
 def test_future_date_and_other_currency_skipped():
-    text = SAMPLE.replace("2026-09-01,Dinner", "2026-12-01,Dinner").replace(
-        "900.00,INR,-450.00", "900.00,USD,-450.00"
-    )
-    reasons = [s.reason for s in parse(text).skipped]
+    rows = [ROWS[0].replace("2026-09-01", "2026-12-01"), ROWS[1].replace(",INR,", ",USD,"), *ROWS[2:]]
+    reasons = [s.reason for s in parse(make_csv(rows)).skipped]
     assert "Dated in the future" in reasons
     assert "Currency USD is not supported" in reasons
 
 
-def test_bad_amount_skipped():
-    text = SAMPLE.replace("1200.00,INR,600.00", "abc,INR,600.00")
-    assert parse(text).skipped[0].reason == "Amount is not a number"
+def test_bad_cost_skipped():
+    rows = [ROWS[0].replace("1200.00", "abc"), *ROWS[1:]]
+    assert parse(make_csv(rows)).skipped[0].reason == "Amount is not a number"
 
 
 def test_not_a_splitwise_file():
@@ -505,8 +642,8 @@ def test_no_member_columns():
 
 
 def test_identical_rows_get_distinct_fingerprints():
-    line = "2026-09-05,Coffee,Dining out,200.00,INR,-100.00,100.00\n"
-    rows = parse(SAMPLE + line + line).rows
+    coffee = "2026-09-06,Coffee,Dining out,200.00,INR,-100.00,100.00"
+    rows = parse(make_csv([*ROWS, coffee, coffee])).rows
     coffees = [r for r in rows if r.description == "Coffee"]
     assert len(coffees) == 2
     assert coffees[0].fingerprint != coffees[1].fingerprint
@@ -515,18 +652,33 @@ def test_identical_rows_get_distinct_fingerprints():
 def test_fingerprint_stable_across_files():
     a = {r.description: r.fingerprint for r in parse().rows}
     # A later export with an extra row and different whitespace/case in a description.
-    later = SAMPLE.replace("Dinner at Toit", "dinner  at TOIT") + "2026-09-06,Snacks,Dining out,100.00,INR,-50.00,50.00\n"
+    snack = "2026-09-06,Snacks,Dining out,100.00,INR,-50.00,50.00"
+    later = make_csv([ROWS[0].replace("Dinner at Toit ", "dinner  at TOIT"), *ROWS[1:], snack])
     b = {r.description.lower(): r.fingerprint for r in parse(later).rows}
     assert b["dinner  at toit"] == a["Dinner at Toit"]
     assert b["cab to airport"] == a["Cab to airport"]
 
 
 def test_fingerprint_ignores_my_share():
-    edited = SAMPLE.replace("900.00,INR,-450.00,450.00", "900.00,INR,-300.00,300.00")
+    edited = make_csv([ROWS[0], ROWS[1].replace("-450.00,450.00", "-300.00,300.00"), *ROWS[2:]])
     before = {r.description: r.fingerprint for r in parse().rows}
     after = {r.description: r for r in parse(edited).rows}
     assert after["Cab to airport"].fingerprint == before["Cab to airport"]
     assert after["Cab to airport"].amount == 300.0
+
+
+def test_memory_key_drops_dates_numbers_and_punctuation():
+    # Real descriptions from the export, which repeat with a different date each time.
+    assert memory_key("Grocery Ratnadeep 22/08") == "grocery ratnadeep"
+    assert memory_key("  grocery  RATNADEEP 6/9 ") == "grocery ratnadeep"
+    assert memory_key("Maintenance Sept26") == "maintenance"
+    assert memory_key("Breakfast+ Ratnadeep 6/9") == "breakfast ratnadeep"
+    assert memory_key("Garam Masala, Chole Masala and Curd") == "garam masala chole masala and curd"
+
+
+def test_memory_key_empty_when_only_numbers():
+    assert memory_key("22/08") == ""
+    assert memory_key(" - ") == ""
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -540,13 +692,13 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'app.services.splitwis
 
 ```python
 """Parses a Splitwise "Export as spreadsheet" CSV into the user's share of
-each expense.
+each expense, and checks that the export is settled.
 
 The file has one column per person after Date/Description/Category/Cost/
 Currency. Each of those holds that person's *net* balance change for the row
 (paid minus owed), not their share, so the share is derived from it. The
-Category column is only used to spot settle-up rows; categorization itself is
-done by Laya, not Splitwise.
+Category column is only used to spot settlement rows; categorization itself
+is done by Laya, not Splitwise.
 """
 
 from __future__ import annotations
@@ -554,7 +706,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-from collections import Counter
+import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -562,6 +715,10 @@ from decimal import Decimal, InvalidOperation
 REQUIRED_COLUMNS = ("date", "description", "category", "cost", "currency")
 SUPPORTED_CURRENCY = "INR"
 _CENT = Decimal("0.01")
+# Splitwise's settle-up description, e.g. "Parijat S. paid Shalin C."
+_PAID_RE = re.compile(r"^\S.*\s+paid\s+\S.*$", re.IGNORECASE)
+_HAS_DIGIT_RE = re.compile(r"\S*\d\S*")
+_NON_WORD_RE = re.compile(r"[^\w]+")
 
 
 class SplitwiseCsvError(ValueError):
@@ -585,11 +742,50 @@ class SkippedRow:
 
 
 @dataclass(frozen=True)
+class Settlement:
+    line: int
+    date: str
+    description: str
+    amount: float
+    currency: str
+
+
+@dataclass(frozen=True)
+class Balance:
+    member: str
+    currency: str
+    amount: float  # positive: is owed money; negative: owes money
+
+
+@dataclass(frozen=True)
 class ParsedCsv:
     members: list[str]
     member_name: str | None
     rows: list[ParsedRow]
     skipped: list[SkippedRow]
+    settlements: list[Settlement]
+    unsettled: list[Balance]
+
+    @property
+    def settled(self) -> bool:
+        return not self.unsettled
+
+
+def unsettled_message(unsettled: list[Balance]) -> str:
+    owing = [b for b in unsettled if b.amount < 0] or unsettled
+    parts = [f"{b.member} owes {b.currency} {abs(b.amount):,.2f}" for b in owing]
+    return (
+        f"This export isn't settled yet: {'; '.join(parts)}. "
+        "Settle up in Splitwise, export again and upload the new file."
+    )
+
+
+def memory_key(description: str) -> str:
+    """Key for the category memory. The same purchase recurs with a different
+    date or number in it ("Grocery Ratnadeep 22/08", "... 6/9"), so tokens
+    with a digit are dropped. Empty means there is nothing worth remembering."""
+    text = _HAS_DIGIT_RE.sub(" ", description.lower())
+    return " ".join(_NON_WORD_RE.sub(" ", text).split())
 
 
 def _is_blank(cells: list[str]) -> bool:
@@ -604,6 +800,20 @@ def _valid_iso_date(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_settlement(category: str, description: str) -> bool:
+    if category.lower() == "payment":
+        return True
+    return not category and bool(_PAID_RE.match(description))
+
+
+def _to_decimal(value: str) -> Decimal:
+    """Parses a number; blank means zero. Raises InvalidOperation for junk or non-finite values."""
+    number = Decimal(value or "0")
+    if not number.is_finite():
+        raise InvalidOperation(value)
+    return number
 
 
 def _fingerprint(date_: str, description: str, cost: Decimal, currency: str, occurrence: int) -> str:
@@ -629,13 +839,15 @@ def parse_splitwise_csv(text: str, member_name: str | None, today: str) -> Parse
     members = [h for h in header[5:] if h]
     if not members:
         raise SplitwiseCsvError("The export has no people columns, so your share can't be worked out")
+    member_cols = {m: header.index(m) for m in members}
+    if member_name not in member_cols:
+        member_name = None
 
-    if member_name is None or member_name not in members:
-        return ParsedCsv(members=members, member_name=None, rows=[], skipped=[])
-
-    member_col = header.index(member_name)
     rows: list[ParsedRow] = []
     skipped: list[SkippedRow] = []
+    settlements: list[Settlement] = []
+    balances: defaultdict[str, defaultdict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    totals: dict[str, dict[str, Decimal]] = {}
     occurrences: Counter[tuple] = Counter()
 
     # csv line numbers are 1-based and the header is line header_index + 1.
@@ -646,15 +858,34 @@ def parse_splitwise_csv(text: str, member_name: str | None, today: str) -> Parse
         date_s, description, category, cost_s, currency = cells[:5]
         currency = currency.upper()
 
+        try:
+            row_balances = {m: _to_decimal(cells[col]) for m, col in member_cols.items()}
+        except InvalidOperation as exc:
+            raise SplitwiseCsvError(
+                f"Line {line_no} has a balance that isn't a number, so I can't check whether the export is settled"
+            ) from exc
+
         if description.lower() == "total balance":
+            totals[currency] = row_balances
+            continue
+        for m, value in row_balances.items():
+            balances[currency][m] += value
+
+        if _is_settlement(category, description):
+            try:
+                amount = float(_to_decimal(cost_s))
+            except InvalidOperation:
+                amount = 0.0
+            settlements.append(
+                Settlement(line=line_no, date=date_s, description=description, amount=amount, currency=currency)
+            )
+            continue
+        if member_name is None:
             continue
 
         def skip(reason: str) -> None:
             skipped.append(SkippedRow(line=line_no, description=description or "(no description)", reason=reason))
 
-        if category.lower() == "payment":
-            skip("Settle-up payment")
-            continue
         if not _valid_iso_date(date_s):
             skip(f"Unrecognised date '{date_s}' (expected YYYY-MM-DD)")
             continue
@@ -668,25 +899,24 @@ def parse_splitwise_csv(text: str, member_name: str | None, today: str) -> Parse
             skip("Missing description")
             continue
         try:
-            cost = Decimal(cost_s)
-            net = Decimal(cells[member_col] or "0")
+            cost = _to_decimal(cost_s)
         except InvalidOperation:
             skip("Amount is not a number")
             continue
-        if not cost.is_finite() or not net.is_finite():
-            skip("Amount is not a number")
-            continue
 
-        if net < 0:
-            share = -net
-        elif net > 0:
-            share = cost - net
-        else:
-            share = Decimal(0)
-        share = share.quantize(_CENT)
-
-        if share <= 0:
+        net = row_balances[member_name]
+        if net == 0:
             skip("Your balance didn't change, so you weren't part of this expense")
+            continue
+        # net < 0: someone else paid and my share is what I now owe.
+        # net > 0: I paid; my share is the cost minus what the others owe me
+        # (assumes I was the only payer).
+        share = (-net if net < 0 else cost - net).quantize(_CENT)
+        if share == 0:
+            skip("You paid the whole amount for others, so none of it is your expense")
+            continue
+        if share < 0:
+            skip("Your balance change is bigger than the cost; check this expense in Splitwise")
             continue
 
         description = description[:500]
@@ -703,19 +933,54 @@ def parse_splitwise_csv(text: str, member_name: str | None, today: str) -> Parse
             )
         )
 
-    return ParsedCsv(members=members, member_name=member_name, rows=rows, skipped=skipped)
+    for currency, total in totals.items():
+        if any(total[m].quantize(_CENT) != balances[currency][m].quantize(_CENT) for m in members):
+            raise SplitwiseCsvError(
+                "The Total balance row doesn't match the rows above it. "
+                "Export again from Splitwise and upload the file without editing it."
+            )
+
+    unsettled = [
+        Balance(member=m, currency=currency, amount=float(balances[currency][m].quantize(_CENT)))
+        for currency in sorted(balances)
+        for m in members
+        if balances[currency][m].quantize(_CENT) != 0
+    ]
+
+    return ParsedCsv(
+        members=members,
+        member_name=member_name,
+        rows=rows,
+        skipped=skipped,
+        settlements=settlements,
+        unsettled=unsettled,
+    )
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cd api && .venv/bin/python -m pytest tests/test_splitwise_parser.py -v`
-Expected: 15 passed
+Expected: 24 passed
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Check against the real export, without committing it**
+
+The user's real export is unsettled, so it must fail the settlement check with the right figure:
+
+```bash
+cd api && .venv/bin/python -c "
+from app.services.splitwise import parse_splitwise_csv, unsettled_message
+p = parse_splitwise_csv(open('$HOME/Downloads/flat_2026-10-03_export.csv').read(), 'Parijat Sutradhar', '2026-10-03')
+print(len(p.rows), 'rows', len(p.skipped), 'skipped', len(p.settlements), 'settlements')
+print(unsettled_message(p.unsettled))"
+```
+
+Expected: `60 rows 1 skipped 2 settlements`, and the message says `Parijat Sutradhar owes INR 4,927.07`. This was verified when the plan was written. If the file is gone, skip this step and say so in the task report.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add api/app/services/splitwise.py api/requirements-dev.txt api/pytest.ini api/tests/__init__.py api/tests/conftest.py api/tests/test_splitwise_parser.py
-git commit -m "feat(api): parse Splitwise CSV exports into the user's share per expense"
+git commit -m "feat(api): parse Splitwise CSV exports and require a settled export"
 ```
 
 ---
@@ -732,7 +997,7 @@ git commit -m "feat(api): parse Splitwise CSV exports into the user's share per 
 - Produces:
   - `class CategorizerUnavailable(Exception)`
   - `@dataclass(frozen=True) class Prediction: category: str; confidence: float`
-  - `async def classify(descriptions: list[str], categories: list[str], *, transport: httpx.AsyncBaseTransport | None = None) -> list[Prediction]`
+  - `async def classify(descriptions: list[str], categories: list[dict], *, transport: httpx.AsyncBaseTransport | None = None) -> list[Prediction]`. Each category is `{"name": str, "description": str}` and is passed to the Space as is.
   - `async def is_ready(*, transport: httpx.AsyncBaseTransport | None = None) -> bool`
   - `settings.laya_space_url: str | None`, `settings.laya_hf_token: str | None`
 
@@ -778,7 +1043,7 @@ import pytest
 from app.services import categorizer
 from app.services.categorizer import CategorizerUnavailable, Prediction, classify, is_ready
 
-CATS = ["Food", "Travel"]
+CATS = [{"name": "Food", "description": "restaurants, food delivery"}, {"name": "Travel", "description": ""}]
 
 
 def transport_returning(handler):
@@ -790,6 +1055,7 @@ async def test_classify_posts_chunks_with_token_and_maps_results():
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
+        assert body["categories"] == CATS  # descriptions go to the Space untouched
         seen.append((request.url.path, request.headers["authorization"], len(body["descriptions"])))
         return httpx.Response(
             200, json={"results": [{"category": "Food", "confidence": 0.8} for _ in body["descriptions"]]}
@@ -908,9 +1174,9 @@ def _client(transport: httpx.AsyncBaseTransport | None, timeout: httpx.Timeout) 
 
 
 async def _classify_all(
-    client: httpx.AsyncClient, descriptions: list[str], categories: list[str]
+    client: httpx.AsyncClient, descriptions: list[str], categories: list[dict]
 ) -> list[Prediction]:
-    allowed = set(categories)
+    allowed = {c["name"] for c in categories}
     out: list[Prediction] = []
     for start in range(0, len(descriptions), CHUNK_SIZE):
         chunk = descriptions[start : start + CHUNK_SIZE]
@@ -928,7 +1194,7 @@ async def _classify_all(
 
 async def classify(
     descriptions: list[str],
-    categories: list[str],
+    categories: list[dict],
     *,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[Prediction]:
@@ -960,7 +1226,7 @@ Note: `response.json()` on non-JSON raises `json.JSONDecodeError`, a `ValueError
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cd api && .venv/bin/python -m pytest tests -v`
-Expected: all parser + categorizer tests pass (25 passed)
+Expected: all parser + categorizer tests pass (34 passed)
 
 - [ ] **Step 6: Commit**
 
@@ -971,22 +1237,25 @@ git commit -m "feat(api): add client for the Laya categorizer Space"
 
 ---
 
-### Task 4: Migration, import service and `/api/splitwise` routes
+### Task 4: Category descriptions
+
+Design Decision 2c. The column is added here, before the Splitwise tables, because Task 5's preview reads it.
 
 **Files:**
-- Create: `migrations/004_splitwise_imports.sql`, `api/app/services/splitwise_import.py`, `api/app/routes/splitwise.py`
-- Modify: `supabase/init.sql` (append section 7), `api/app/schemas.py` (append models), `api/app/main.py` (import + register router)
-- Test: `api/tests/test_splitwise_routes.py`
+- Create: `migrations/004_splitwise_imports.sql`
+- Modify: `supabase/init.sql` (start section 7), `api/app/services/categories.py`, `api/app/schemas.py` (`CategoryOut`, `CategoryIn`), `api/app/routes/categories.py`, `api/app/finance_config.py` (`ConfiguredCategory`), `app/src/api.ts`, `app/src/components/modals/CategoryFormModal.tsx`, `app/src/components/modals/ManageCategoriesModal.tsx`
+- Test: `api/tests/test_category_descriptions.py`
 
 **Interfaces:**
-- Consumes: `parse_splitwise_csv`, `SplitwiseCsvError` (Task 2); `categorizer.classify`, `categorizer.is_ready`, `CategorizerUnavailable` (Task 3); existing `lock_accounts`, `sync_balance`, `list_categories`, `category_names`, `today_iso`, `acquire`, `transaction`.
-- Produces (HTTP, consumed by Task 5), all behind Supabase JWT auth:
-  - `GET /api/splitwise/classifier-status` → `{ready: boolean}`
-  - `POST /api/splitwise/preview` body `{csv: string, memberName: string|null}` → `{members: string[], memberName: string|null, rows: [{fingerprint, date, description, amount, category: string|null, confidence: number|null, alreadyImported: boolean}], skipped: [{line, description, reason}], classifier: "ok"|"unavailable"|"not_run"}`
-  - `POST /api/splitwise/import` body `{accountId, rows: [{fingerprint, date, description, amount, category}]}` (1–500 rows) → `201 {imported: number, skippedDuplicates: number, account: Account}`
-- Produces (Python): `already_imported(conn, fingerprints: list[str]) -> set[str]`; `import_rows(conn, tz_name: str, account_id: str, rows: list[SplitwiseImportRowIn]) -> dict` returning `{"imported": int, "skipped_duplicates": int, "account": dict}`.
+- Consumes: the test harness from Task 2 (`conftest.py`, `pytest.ini`).
+- Produces:
+  - Column `categories.description VARCHAR(200) NOT NULL DEFAULT ''`.
+  - `list_categories(conn)` dicts gain `"description": str`, consumed by Task 5.
+  - `GET /api/config`, `POST /api/categories` and `PATCH /api/categories/{id}` responses gain `description: string`. It is `""` for the reserved Transfer, Salary and Adjustment rows.
+  - `POST` and `PATCH /api/categories` accept an optional `description` of up to 200 characters, trimmed. On `PATCH`, an omitted or `null` description keeps the stored one, so an older app build can't wipe it.
+  - TypeScript: `Category.description: string` and `export interface CategoryInput { name: string; icon: string; color: string; description?: string }`.
 
-- [ ] **Step 1: Write the migration and update init.sql**
+- [ ] **Step 1: Write the migration, update init.sql, create the test DB**
 
 `migrations/004_splitwise_imports.sql`:
 
@@ -1000,20 +1269,17 @@ git commit -m "feat(api): add client for the Laya categorizer Space"
 --     < migrations/004_splitwise_imports.sql
 --
 -- and on Supabase by pasting it into the SQL editor (or psql against the
--- direct connection, port 5432).
+-- direct connection, port 5432). Safe to run more than once.
 --
--- One row per Splitwise expense already imported, keyed on a fingerprint of
--- date/description/cost/currency/occurrence, so re-uploading an overlapping
--- export never records the same expense twice. Transactions stay immutable;
--- this table only points at them.
+-- Everything the Splitwise import needs: a short description per category
+-- for the Laya categorizer, and (added in Task 5) the dedup and
+-- category-memory tables.
 
 BEGIN;
 
-CREATE TABLE IF NOT EXISTS splitwise_imports (
-    fingerprint CHAR(64) PRIMARY KEY,
-    transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-    imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
-);
+-- Plain words for what goes in the category (docs/categories.md). Laya
+-- scores each expense against these; empty falls back to the name.
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS description VARCHAR(200) NOT NULL DEFAULT '';
 
 COMMIT;
 ```
@@ -1022,19 +1288,14 @@ Append to the end of `supabase/init.sql`:
 
 ```sql
 
--- 7. Splitwise imports
--- One row per Splitwise expense already imported, keyed on a fingerprint of
--- date/description/cost/currency/occurrence (api/app/services/splitwise.py),
--- so re-uploading an overlapping export never records an expense twice.
-CREATE TABLE IF NOT EXISTS splitwise_imports (
-    fingerprint CHAR(64) PRIMARY KEY,
-    transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-    imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
-);
+-- 7. Splitwise import
+-- Short description per category, given to the Laya categorizer
+-- (docs/categories.md). Empty means Laya only sees the name.
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS description VARCHAR(200) NOT NULL DEFAULT '';
 ```
 
 Apply to the local dev DB: `docker exec -i finance-db psql -U postgres -d financedb < migrations/004_splitwise_imports.sql`
-Expected: `BEGIN`, `CREATE TABLE`, `COMMIT`
+Expected: `BEGIN`, `ALTER TABLE`, `COMMIT`
 
 Create the test DB (once):
 
@@ -1043,6 +1304,332 @@ docker exec finance-db psql -U postgres -c "CREATE DATABASE financedb_test"
 docker exec -i finance-db psql -U postgres -d financedb_test < supabase/init.sql
 export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/financedb_test
 ```
+
+- [ ] **Step 2: Write the failing tests**
+
+`api/tests/test_category_descriptions.py`:
+
+```python
+"""Category descriptions through the existing category and config routes.
+Needs TEST_DATABASE_URL (Task 4 Step 1), like the Splitwise route tests."""
+
+import os
+
+import httpx
+import pytest
+
+pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
+
+from app import db  # noqa: E402
+from app.auth import get_current_user  # noqa: E402
+from app.main import app  # noqa: E402
+
+COMMUTE = "cabs, autos, metro, bus"
+BASE = {"name": "Commute", "icon": "🚕", "color": "#64d2ff"}
+
+
+@pytest.fixture
+async def client():
+    app.dependency_overrides[get_current_user] = lambda: {"sub": "test-user"}
+    async with db.acquire() as conn:
+        await conn.execute("TRUNCATE transactions, accounts, categories CASCADE")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+    await db.close_pool()
+
+
+async def add(client, **extra):
+    r = await client.post("/api/categories", json={**BASE, **extra})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+async def test_create_with_description_and_read_it_back(client):
+    assert (await add(client, description=COMMUTE))["description"] == COMMUTE
+    listed = {c["name"]: c for c in (await client.get("/api/config")).json()["categories"]}
+    assert listed["Commute"]["description"] == COMMUTE
+    assert listed["Transfer"]["description"] == ""  # reserved rows have none
+
+
+async def test_create_without_description_is_empty(client):
+    assert (await add(client))["description"] == ""
+
+
+async def test_edit_without_description_keeps_it(client):
+    # What the app sent before this change: name, icon and colour only.
+    created = await add(client, description=COMMUTE)
+    r = await client.patch(f"/api/categories/{created['id']}", json={**BASE, "icon": "🛺"})
+    assert r.status_code == 200, r.text
+    assert (r.json()["icon"], r.json()["description"]) == ("🛺", COMMUTE)
+
+
+async def test_edit_changes_trims_or_clears_description(client):
+    created = await add(client, description=COMMUTE)
+    url = f"/api/categories/{created['id']}"
+    assert (await client.patch(url, json={**BASE, "description": "  cabs and metro "})).json()["description"] == "cabs and metro"
+    assert (await client.patch(url, json={**BASE, "description": ""})).json()["description"] == ""
+
+
+async def test_description_over_200_chars_is_rejected(client):
+    r = await client.post("/api/categories", json={**BASE, "description": "a" * 201})
+    assert r.status_code == 400
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `cd api && TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/financedb_test .venv/bin/python -m pytest tests/test_category_descriptions.py -v`
+Expected: FAIL with `KeyError: 'description'` in the first four tests. The last test fails because the API returns 201.
+
+- [ ] **Step 4: Backend implementation**
+
+`api/app/services/categories.py`:
+
+```python
+CATEGORY_COLUMNS = "id, name, icon, color, spendable, hidden, description"
+```
+
+In `to_category`, add after `"hidden"`:
+
+```python
+        "description": row["description"],
+```
+
+Replace `create_category` and `update_category`:
+
+```python
+async def create_category(
+    conn: asyncpg.connection.Connection, name: str, icon: str, color: str, description: str = ""
+) -> dict:
+    _check_color(color)
+    row = await conn.fetchrow(
+        f"""INSERT INTO categories (name, icon, color, description)
+                 VALUES ($1, $2, $3, $4)
+              RETURNING {CATEGORY_COLUMNS}""",
+        name,
+        icon,
+        color,
+        description,
+    )
+    return to_category(row)
+
+
+async def update_category(
+    conn: asyncpg.connection.Connection,
+    category_id: str,
+    name: str,
+    icon: str,
+    color: str,
+    description: str | None = None,
+) -> dict:
+    """description=None keeps the stored one (clients that predate the field)."""
+    _check_color(color)
+    row = await conn.fetchrow(
+        f"""UPDATE categories
+               SET name = $2, icon = $3, color = $4, description = COALESCE($5, description)
+             WHERE id = $1::uuid
+         RETURNING {CATEGORY_COLUMNS}""",
+        category_id,
+        name,
+        icon,
+        color,
+        description,
+    )
+    if row is None:
+        raise not_found(f"Category {category_id} not found")
+    return to_category(row)
+```
+
+In `provision_categories`, seed the description too:
+
+```python
+        row = await conn.fetchrow(
+            """INSERT INTO categories (name, icon, color, description)
+                    VALUES ($1, $2, $3, $4)
+               ON CONFLICT (name) DO NOTHING
+                 RETURNING name""",
+            category.name,
+            category.icon,
+            category.color,
+            category.description,
+        )
+```
+
+`api/app/schemas.py`: add to `CategoryOut`, after `hidden`:
+
+```python
+    description: str = ""
+```
+
+and to `CategoryIn`, after `color`:
+
+```python
+    description: Optional[str] = Field(default=None, max_length=200)
+
+    @field_validator("description")
+    @classmethod
+    def _description(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() if v is not None else None
+```
+
+`api/app/routes/categories.py`:
+
+```python
+        row = await create_category(conn, body.name, body.icon, body.color, body.description or "")
+```
+
+```python
+        row = await update_category(conn, category_id, body.name, body.icon, body.color, body.description)
+```
+
+`api/app/finance_config.py`: add to `ConfiguredCategory`, after `color`:
+
+```python
+    description: str = Field(default="", max_length=200)
+```
+
+`provision_categories` only inserts missing categories. Categories that already exist get their description from the app (Step 6). When the new set in `docs/categories.md` ships, its config block already includes descriptions.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cd api && TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/financedb_test .venv/bin/python -m pytest -v`
+Expected: all pass (39 passed: 24 parser, 10 categorizer, 5 here).
+
+- [ ] **Step 6: App: show and edit the description**
+
+`app/src/api.ts`: add to `Category`, after `hidden`:
+
+```ts
+  /** Plain words for what goes in the category; the Splitwise import's categorizer reads it. */
+  description: string;
+```
+
+Add below `AppConfig`:
+
+```ts
+export interface CategoryInput {
+  name: string;
+  icon: string;
+  color: string;
+  description?: string;
+}
+```
+
+Change the `addCategory` and `updateCategory` body types from `{ name: string; icon: string; color: string }` to `CategoryInput`.
+
+`app/src/components/modals/ManageCategoriesModal.tsx`: import `CategoryInput` with `Category`, and type `onAdd` as `(input: CategoryInput) => Promise<void>` and `onEdit` as `(id: string, input: CategoryInput) => Promise<void>`. `Dashboard.tsx` passes `input` straight through, so it needs no change.
+
+`app/src/components/modals/CategoryFormModal.tsx`:
+- Import `CategoryInput` and type `onSave` as `(input: CategoryInput) => Promise<void>`.
+- Add state `const [description, setDescription] = useState(category?.description ?? '');`.
+- In `submit`, send `{ name: name.trim(), icon: icon.trim(), color: color.trim(), description: description.trim() }`.
+- Add this field between the Icon/Colour row and the error line:
+
+```tsx
+        <View className="gap-1">
+          <Text className="text-xs font-medium uppercase tracking-widest text-ink-secondary">What goes in it</Text>
+          <TextInput
+            className="rounded-xl border border-border px-3 py-3 text-sm text-ink"
+            placeholder="e.g. cabs, autos, metro, bus"
+            value={description}
+            onChangeText={setDescription}
+            maxLength={200}
+            multiline
+          />
+          <Text className="text-[10px] text-muted">A few plain words, no brand names. Helps the Splitwise import pick this category.</Text>
+        </View>
+```
+
+Run: `cd app && npx tsc --noEmit`
+Expected: no errors.
+
+Check by hand with `EXPO_PUBLIC_API_URL=http://localhost:3001 npx expo start --web`:
+1. Edit Rent, enter `rent, society maintenance, move-in charges, monthly furniture and appliance rental` and save. Open it again and the text is still there.
+2. Change only the icon of a category that has a description. The description stays.
+3. Add a category with no description. It saves as before.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add migrations/004_splitwise_imports.sql supabase/init.sql api/app/services/categories.py api/app/schemas.py api/app/routes/categories.py api/app/finance_config.py api/tests/test_category_descriptions.py app/src/api.ts app/src/components/modals/CategoryFormModal.tsx app/src/components/modals/ManageCategoriesModal.tsx
+git commit -m "feat: add a description to categories for the Laya categorizer"
+```
+
+---
+
+### Task 5: Migration, import service and `/api/splitwise` routes
+
+**Files:**
+- Create: `api/app/services/splitwise_import.py`, `api/app/routes/splitwise.py`
+- Modify: `migrations/004_splitwise_imports.sql` and `supabase/init.sql` (both from Task 4), `api/app/schemas.py` (append models), `api/app/main.py` (import + register router)
+- Test: `api/tests/test_splitwise_routes.py`
+
+**Interfaces:**
+- Consumes: `parse_splitwise_csv`, `SplitwiseCsvError`, `unsettled_message`, `memory_key`, `ParsedCsv.settled`, `ParsedCsv.settlements` (Task 2); `categorizer.classify`, `categorizer.is_ready`, `CategorizerUnavailable` (Task 3); `list_categories` with `description` (Task 4); existing `lock_accounts`, `sync_balance`, `category_names`, `today_iso`, `acquire`, `transaction`.
+- Produces (HTTP, consumed by Task 6), all behind Supabase JWT auth:
+  - `GET /api/splitwise/classifier-status` → `{ready: boolean}`
+  - `POST /api/splitwise/preview` body `{csv: string, memberName: string|null}` → `{members: string[], memberName: string|null, rows: [{fingerprint, date, description, amount, category: string|null, confidence: number|null, source: "memory"|"laya"|null, alreadyImported: boolean}], skipped: [{line, description, reason}], settlements: [{line, date, description, amount}], classifier: "ok"|"unavailable"|"not_run"}`. An unsettled export is a `400` whose `error` is `unsettled_message(...)`.
+  - `POST /api/splitwise/import` body `{accountId, rows: [{fingerprint, date, description, amount, category}]}` (1–500 rows) → `201 {imported: number, skippedDuplicates: number, account: Account}`
+- Produces (Python): `already_imported(conn, fingerprints: list[str]) -> set[str]`; `recall_categories(conn, keys: list[str]) -> dict[str, str]` (memory key → remembered category name); `import_rows(conn, tz_name: str, account_id: str, rows: list[SplitwiseImportRowIn]) -> dict` returning `{"imported": int, "skipped_duplicates": int, "account": dict}`.
+
+- [ ] **Step 1: Add the tables to the migration and init.sql**
+
+In `migrations/004_splitwise_imports.sql` (created in Task 4), insert between the `ALTER TABLE categories …` line and `COMMIT;`:
+
+```sql
+
+-- One row per Splitwise expense already imported, keyed on a fingerprint of
+-- date/description/cost/currency/occurrence, so re-uploading an overlapping
+-- export never records the same expense twice. Transactions stay immutable;
+-- this table only points at them.
+CREATE TABLE IF NOT EXISTS splitwise_imports (
+    fingerprint CHAR(64) PRIMARY KEY,
+    transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+
+-- The category the user confirmed for each description (keyed by
+-- splitwise.memory_key), so a repeat description is categorized without
+-- calling Laya. It holds a category *name*, not a foreign key: a renamed or
+-- deleted category is simply ignored at lookup time.
+CREATE TABLE IF NOT EXISTS category_memory (
+    description_key TEXT PRIMARY KEY,
+    category VARCHAR(50) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+```
+
+Append to the end of `supabase/init.sql`, after the section 7 `ALTER TABLE` from Task 4:
+
+```sql
+
+-- One row per Splitwise expense already imported, keyed on a fingerprint of
+-- date/description/cost/currency/occurrence (api/app/services/splitwise.py),
+-- so re-uploading an overlapping export never records an expense twice.
+CREATE TABLE IF NOT EXISTS splitwise_imports (
+    fingerprint CHAR(64) PRIMARY KEY,
+    transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+
+-- Category the user last confirmed for each description, keyed by
+-- splitwise.memory_key, so repeats skip Laya. A category name, not a foreign
+-- key: names that no longer exist are ignored at lookup time.
+CREATE TABLE IF NOT EXISTS category_memory (
+    description_key TEXT PRIMARY KEY,
+    category VARCHAR(50) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+```
+
+Apply to the local dev DB and to the test DB from Task 4 Step 1. The migration is safe to re-run:
+
+```bash
+docker exec -i finance-db psql -U postgres -d financedb < migrations/004_splitwise_imports.sql
+docker exec -i finance-db psql -U postgres -d financedb_test < migrations/004_splitwise_imports.sql
+```
+Expected for each: `BEGIN`, `ALTER TABLE`, `CREATE TABLE`, `CREATE TABLE`, `COMMIT`
 
 - [ ] **Step 2: Append the schemas**
 
@@ -1069,6 +1656,7 @@ class SplitwisePreviewRowOut(CamelModel):
     amount: float
     category: Optional[str] = None
     confidence: Optional[float] = None
+    source: Optional[Literal["memory", "laya"]] = None
     already_imported: bool
 
 
@@ -1078,11 +1666,19 @@ class SplitwiseSkippedOut(CamelModel):
     reason: str
 
 
+class SplitwiseSettlementOut(CamelModel):
+    line: int
+    date: str
+    description: str
+    amount: float
+
+
 class SplitwisePreviewOut(CamelModel):
     members: list[str]
     member_name: Optional[str] = None
     rows: list[SplitwisePreviewRowOut]
     skipped: list[SplitwiseSkippedOut]
+    settlements: list[SplitwiseSettlementOut]
     classifier: Literal["ok", "unavailable", "not_run"]
 
 
@@ -1161,7 +1757,7 @@ import uuid
 import httpx
 import pytest
 
-from tests.test_splitwise_parser import SAMPLE
+from tests.test_splitwise_parser import ROWS, SAMPLE, make_csv
 
 pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
 
@@ -1171,19 +1767,34 @@ from app.main import app  # noqa: E402
 from app.routes import splitwise as splitwise_routes  # noqa: E402
 from app.services.categorizer import CategorizerUnavailable, Prediction  # noqa: E402
 
-ME = "Parijat S"
+ME = "Parijat Sutradhar"
+# What the preview must send to Laya for the fixture's categories.
+CHOICES = [{"name": "Food", "description": "restaurants and food delivery"}, {"name": "Travel", "description": ""}]
+
+# A later, settled export. "Dinner at Toit 20/9" and "Cab to airport" repeat
+# descriptions from SAMPLE; "Snacks" appears twice in different case.
+LATER = make_csv(
+    [
+        "2026-09-20,Dinner at Toit 20/9,Dining out,1000.00,INR,500.00,-500.00",
+        "2026-09-21,Cab to airport,Taxi,600.00,INR,-300.00,300.00",
+        "2026-09-21,Snacks,Dining out,100.00,INR,-50.00,50.00",
+        "2026-09-22,snacks,Dining out,100.00,INR,-50.00,50.00",
+        "2026-09-23,Asha K. paid Parijat S.,Payment,100.00,INR,-100.00,100.00",
+    ]
+)
 
 
 @pytest.fixture
 async def client():
     app.dependency_overrides[get_current_user] = lambda: {"sub": "test-user"}
     async with db.acquire() as conn:
-        await conn.execute("TRUNCATE splitwise_imports, transactions, accounts, categories CASCADE")
+        await conn.execute("TRUNCATE splitwise_imports, category_memory, transactions, accounts, categories CASCADE")
         account_id = await conn.fetchval(
             "INSERT INTO accounts (name, kind, last_reconciled_balance) VALUES ('Primary Account', 'bank', 10000) RETURNING id"
         )
         await conn.execute(
-            "INSERT INTO categories (name, icon, color) VALUES ('Food', '🍔', '#ff9f0a'), ('Travel', '🚕', '#5b5cf6')"
+            "INSERT INTO categories (name, icon, color, description) VALUES "
+            "('Food', '🍔', '#ff9f0a', 'restaurants and food delivery'), ('Travel', '🚕', '#5b5cf6', '')"
         )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -1213,7 +1824,7 @@ async def preview(client, member=ME, csv=SAMPLE):
 
 async def test_preview_without_member_lists_members(client, laya_ok):
     body = await preview(client, member=None)
-    assert body["members"] == ["Parijat S", "Asha K"]
+    assert body["members"] == ["Parijat Sutradhar", "Asha Kumar"]
     assert body["memberName"] is None and body["rows"] == [] and body["classifier"] == "not_run"
     assert laya_ok == []
 
@@ -1225,8 +1836,10 @@ async def test_preview_categorizes_every_row(client, laya_ok):
         ("Dinner at Toit", 600.0, "Food", False),
         ("Cab to airport", 450.0, "Travel", False),
     ]
-    assert [s["reason"] for s in body["skipped"]][0] == "Settle-up payment"
-    assert laya_ok == [(["Dinner at Toit", "Cab to airport"], ["Food", "Travel"])]
+    assert [r["source"] for r in body["rows"]] == ["laya", "laya"]
+    assert [s["description"] for s in body["settlements"]] == ["Asha K. paid Parijat S."]
+    assert all("paid" not in s["description"] for s in body["skipped"])
+    assert laya_ok == [(["Dinner at Toit", "Cab to airport"], CHOICES)]  # descriptions included
 
 
 async def test_preview_when_categorizer_down(client, monkeypatch):
@@ -1237,6 +1850,14 @@ async def test_preview_when_categorizer_down(client, monkeypatch):
     body = await preview(client)
     assert body["classifier"] == "unavailable"
     assert [r["category"] for r in body["rows"]] == [None, None]
+
+
+async def test_preview_rejects_unsettled_export(client, laya_ok):
+    for member in (None, ME):
+        r = await client.post("/api/splitwise/preview", json={"csv": make_csv(ROWS[:-1]), "memberName": member})
+        assert r.status_code == 400
+        assert r.json()["error"].startswith("This export isn't settled yet: Asha Kumar owes INR 240.00")
+    assert laya_ok == []
 
 
 async def test_preview_rejects_non_splitwise_file(client, laya_ok):
@@ -1279,6 +1900,41 @@ async def test_reimport_skips_duplicates(client, laya_ok):
     assert r.status_code == 201
     assert r.json()["imported"] == 0 and r.json()["skippedDuplicates"] == 2
     assert r.json()["account"]["balance"] == 10000 - 600 - 450
+
+
+async def test_memory_hit_skips_laya(client, laya_ok):
+    rows = await to_import_rows(client)
+    await client.post("/api/splitwise/import", json={"accountId": client.account_id, "rows": rows})
+    laya_ok.clear()
+
+    body = await preview(client, csv=LATER)
+    assert [(r["description"], r["category"], r["source"], r["confidence"]) for r in body["rows"]] == [
+        ("Dinner at Toit 20/9", "Food", "memory", None),  # date suffix ignored by the key
+        ("Cab to airport", "Travel", "memory", None),
+        ("Snacks", "Travel", "laya", 0.9),
+        ("snacks", "Travel", "laya", 0.9),
+    ]
+    # Only the unseen description goes to Laya, and only once for both rows.
+    assert laya_ok == [(["Snacks"], CHOICES)]
+    assert body["classifier"] == "ok"
+
+
+async def test_import_remembers_corrected_category(client, laya_ok):
+    rows = await to_import_rows(client)
+    rows[1]["category"] = "Food"  # the user overrides Laya's "Travel"
+    await client.post("/api/splitwise/import", json={"accountId": client.account_id, "rows": rows})
+
+    cab = next(r for r in (await preview(client, csv=LATER))["rows"] if r["description"] == "Cab to airport")
+    assert (cab["category"], cab["source"]) == ("Food", "memory")
+
+
+async def test_memory_ignores_deleted_category(client, laya_ok):
+    async with db.acquire() as conn:
+        await conn.execute("INSERT INTO category_memory (description_key, category) VALUES ('snacks', 'Gone')")
+
+    body = await preview(client, csv=LATER)
+    assert {(r["description"], r["source"]) for r in body["rows"]} >= {("Snacks", "laya"), ("snacks", "laya")}
+    assert "Snacks" in laya_ok[0][0]
 
 
 async def test_import_rejects_unknown_category_atomically(client, laya_ok):
@@ -1333,8 +1989,8 @@ Expected: FAIL with `ImportError: cannot import name 'splitwise' from 'app.route
 `api/app/services/splitwise_import.py`:
 
 ```python
-"""DB side of the Splitwise import: which rows are already in, and a bulk
-insert of the rest.
+"""DB side of the Splitwise import: which rows are already in, the category
+memory, and a bulk insert of the rest.
 
 Inserts every row in one statement rather than calling insert_transaction per
 row: the API runs far from the database (see KNOWN_ISSUES.md), so hundreds of
@@ -1355,6 +2011,7 @@ from ..errors import bad_request
 from .balances import lock_accounts, sync_balance
 from .categories import category_names
 from .dates import parse_iso_date, today_iso
+from .splitwise import memory_key
 
 
 def transaction_timestamp(tz_name: str, date_: str) -> datetime | None:
@@ -1373,6 +2030,17 @@ async def already_imported(conn: asyncpg.connection.Connection, fingerprints: li
         "SELECT fingerprint FROM splitwise_imports WHERE fingerprint = ANY($1::text[])", fingerprints
     )
     return {row["fingerprint"] for row in rows}
+
+
+async def recall_categories(conn: asyncpg.connection.Connection, keys: list[str]) -> dict[str, str]:
+    """Remembered category per memory key. The caller checks the category
+    still exists, since the table stores names, not foreign keys."""
+    if not keys:
+        return {}
+    rows = await conn.fetch(
+        "SELECT description_key, category FROM category_memory WHERE description_key = ANY($1::text[])", keys
+    )
+    return {row["description_key"]: row["category"] for row in rows}
 
 
 async def import_rows(conn: asyncpg.connection.Connection, tz_name: str, account_id: str, rows: list) -> dict:
@@ -1410,6 +2078,19 @@ async def import_rows(conn: asyncpg.connection.Connection, tz_name: str, account
             ids,
         )
 
+        # Importing is the user's confirmation, so remember each row's final
+        # category, whether it was Laya's or the user's. Last row wins per key.
+        remembered = {key: r.category for r in fresh if (key := memory_key(r.description))}
+        if remembered:
+            await conn.execute(
+                """INSERT INTO category_memory (description_key, category)
+                   SELECT * FROM unnest($1::text[], $2::text[])
+                   ON CONFLICT (description_key)
+                   DO UPDATE SET category = EXCLUDED.category, updated_at = clock_timestamp()""",
+                list(remembered),
+                list(remembered.values()),
+            )
+
     account = await sync_balance(conn, account_id)
     return {"imported": len(fresh), "skipped_duplicates": len(rows) - len(fresh), "account": account}
 ```
@@ -1421,15 +2102,17 @@ async def import_rows(conn: asyncpg.connection.Connection, tz_name: str, account
 ```python
 """Splitwise CSV import.
 
-/preview parses the export, drops rows already imported, and asks the Laya
-categorizer for a category per remaining row. It never writes. /import
-records the rows the user confirmed. /classifier-status lets the app wake the
+/preview parses the export, drops rows already imported, reuses the category
+the user confirmed before for a repeat description, and asks the Laya
+categorizer about the rest. It never writes. /import records the rows the
+user confirmed and remembers their categories. /classifier-status lets the app wake the
 Hugging Face Space as soon as the import modal opens.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import NamedTuple, Optional
 
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
@@ -1447,16 +2130,23 @@ from ..schemas import (
     SplitwisePreviewIn,
     SplitwisePreviewOut,
     SplitwisePreviewRowOut,
+    SplitwiseSettlementOut,
     SplitwiseSkippedOut,
 )
 from ..services import categorizer
 from ..services.categories import list_categories
 from ..services.dates import today_iso
-from ..services.splitwise import SplitwiseCsvError, parse_splitwise_csv
-from ..services.splitwise_import import already_imported, import_rows
+from ..services.splitwise import SplitwiseCsvError, memory_key, parse_splitwise_csv, unsettled_message
+from ..services.splitwise_import import already_imported, import_rows, recall_categories
 
 logger = logging.getLogger("finance_api")
 router = APIRouter()
+
+
+class Suggestion(NamedTuple):
+    category: str
+    confidence: Optional[float]
+    source: str  # "memory" or "laya"
 
 
 @router.get("/classifier-status", response_model=ClassifierStatusOut)
@@ -1471,6 +2161,11 @@ async def preview(body: SplitwisePreviewIn) -> SplitwisePreviewOut:
     except SplitwiseCsvError as exc:
         raise bad_request(str(exc)) from exc
 
+    # The user only imports after settling up. Checked before the member step
+    # and before any DB or Laya call, so an unsettled file costs nothing.
+    if not parsed.settled:
+        raise bad_request(unsettled_message(parsed.unsettled))
+
     if len(parsed.rows) > SPLITWISE_MAX_ROWS:
         raise bad_request(
             f"The export has {len(parsed.rows)} expenses; import at most {SPLITWISE_MAX_ROWS} at a time"
@@ -1478,15 +2173,33 @@ async def preview(body: SplitwisePreviewIn) -> SplitwisePreviewOut:
 
     async with acquire() as conn:
         imported = await already_imported(conn, [r.fingerprint for r in parsed.rows])
-        categories = [c["name"] for c in await list_categories(conn) if c["spendable"]]
+        # Laya scores against each category's description (docs/categories.md).
+        choices = [
+            {"name": c["name"], "description": c["description"]} for c in await list_categories(conn) if c["spendable"]
+        ]
+        fresh = [r for r in parsed.rows if r.fingerprint not in imported]
+        keys = {r.fingerprint: memory_key(r.description) for r in fresh}
+        remembered = await recall_categories(conn, sorted({k for k in keys.values() if k}))
 
-    fresh = [r for r in parsed.rows if r.fingerprint not in imported]
-    predictions: dict[str, categorizer.Prediction] = {}
+    names = {c["name"] for c in choices}
+    suggestions: dict[str, Suggestion] = {}
+    # Rows Laya must see, grouped so each distinct description is asked once.
+    # A row with an empty key can't be grouped, so it stands alone.
+    ask: dict[str, list] = {}
+    for r in fresh:
+        category = remembered.get(keys[r.fingerprint])
+        if category in names:  # only while it can still be picked
+            suggestions[r.fingerprint] = Suggestion(category, None, "memory")
+        else:
+            ask.setdefault(keys[r.fingerprint] or r.fingerprint, []).append(r)
+
     classifier = "not_run"
-    if fresh and categories:
+    if ask and choices:
         try:
-            results = await categorizer.classify([r.description for r in fresh], categories)
-            predictions = {row.fingerprint: p for row, p in zip(fresh, results)}
+            results = await categorizer.classify([group[0].description for group in ask.values()], choices)
+            for group, p in zip(ask.values(), results):
+                for r in group:
+                    suggestions[r.fingerprint] = Suggestion(p.category, p.confidence, "laya")
             classifier = "ok"
         except categorizer.CategorizerUnavailable as exc:
             logger.warning("Laya categorizer unavailable: %s", exc)
@@ -1501,13 +2214,19 @@ async def preview(body: SplitwisePreviewIn) -> SplitwisePreviewOut:
                 date=r.date,
                 description=r.description,
                 amount=r.amount,
-                category=predictions[r.fingerprint].category if r.fingerprint in predictions else None,
-                confidence=predictions[r.fingerprint].confidence if r.fingerprint in predictions else None,
+                category=s.category if s else None,
+                confidence=s.confidence if s else None,
+                source=s.source if s else None,
                 already_imported=r.fingerprint in imported,
             )
             for r in parsed.rows
+            for s in [suggestions.get(r.fingerprint)]
         ],
         skipped=[SplitwiseSkippedOut(line=s.line, description=s.description, reason=s.reason) for s in parsed.skipped],
+        settlements=[
+            SplitwiseSettlementOut(line=s.line, date=s.date, description=s.description, amount=s.amount)
+            for s in parsed.settlements
+        ],
         classifier=classifier,
     )
 
@@ -1538,7 +2257,7 @@ app.include_router(splitwise.router, prefix="/api/splitwise", dependencies=[requ
 - [ ] **Step 7: Run all backend tests**
 
 Run: `cd api && TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/financedb_test .venv/bin/python -m pytest -v`
-Expected: all pass (36 passed). Also run once without `TEST_DATABASE_URL`: route tests show as skipped, others pass.
+Expected: all pass (54 passed). Also run once without `TEST_DATABASE_URL`: route tests show as skipped, others pass.
 
 If `test_preview_categorizes_every_row` fails on camelCase keys, confirm FastAPI serializes `response_model` by alias (it does by default); do not switch to snake_case on the wire.
 
@@ -1557,19 +2276,19 @@ Expected: `"ok"` and sensible categories. Report the categories for the first ro
 
 ```bash
 git add migrations/004_splitwise_imports.sql supabase/init.sql api/app/schemas.py api/app/services/splitwise_import.py api/app/routes/splitwise.py api/app/main.py api/tests/test_splitwise_routes.py
-git commit -m "feat(api): Splitwise preview and import endpoints with dedup"
+git commit -m "feat(api): Splitwise preview and import endpoints with dedup and category memory"
 ```
 
 ---
 
-### Task 5: App — file picking, API client, import modal, dashboard button
+### Task 6: App — file picking, API client, import modal, dashboard button
 
 **Files:**
 - Create: `app/src/splitwiseFile.ts`, `app/src/components/modals/ImportSplitwiseModal.tsx`
 - Modify: `app/src/api.ts`, `app/src/components/Overlay.tsx`, `app/src/screens/Dashboard.tsx`, `app/package.json` + lock (via `npx expo install`)
 
 **Interfaces:**
-- Consumes: the three HTTP endpoints from Task 4.
+- Consumes: the three HTTP endpoints from Task 5.
 - Produces: `pickCsvText(): Promise<{ name: string; text: string } | null>`; `ImportSplitwiseModal` props `{ accounts: Account[]; catalog: Catalog; onClose(): void; onImport(input: SplitwiseImportInput): Promise<SplitwiseImportResult> }`; `Overlay` optional prop `wide?: boolean`.
 
 There is no frontend test runner in this project. Verification is the TypeScript check plus the manual checklist in Step 7.
@@ -1622,9 +2341,12 @@ export interface SplitwisePreviewRow {
   description: string;
   /** The user's share of the expense, which is what gets recorded. */
   amount: number;
-  /** Laya's proposal; null when the categorizer couldn't be reached. */
+  /** The suggested category; null when Laya couldn't be reached and nothing was remembered. */
   category: string | null;
+  /** Laya's confidence; null for remembered rows. */
   confidence: number | null;
+  /** "memory": the category the user confirmed for this description before. */
+  source: 'memory' | 'laya' | null;
   alreadyImported: boolean;
 }
 
@@ -1640,6 +2362,8 @@ export interface SplitwisePreview {
   memberName: string | null;
   rows: SplitwisePreviewRow[];
   skipped: SplitwiseSkipped[];
+  /** "X paid Y" rows. Not expenses; shown so the user can see the settle-up. */
+  settlements: { line: number; date: string; description: string; amount: number }[];
   classifier: 'ok' | 'unavailable' | 'not_run';
 }
 
@@ -1700,6 +2424,7 @@ import {
   type Account,
   type SplitwiseImportInput,
   type SplitwiseImportResult,
+  type SplitwisePreview,
   type SplitwisePreviewRow,
   type SplitwiseSkipped,
 } from '../../api';
@@ -1741,6 +2466,7 @@ export function ImportSplitwiseModal({ accounts, catalog, onClose, onImport }: I
   const [alreadyCount, setAlreadyCount] = useState(0);
   const [skipped, setSkipped] = useState<SplitwiseSkipped[]>([]);
   const [showSkipped, setShowSkipped] = useState(false);
+  const [settlements, setSettlements] = useState<SplitwisePreview['settlements']>([]);
   const [classifier, setClassifier] = useState<'ok' | 'unavailable' | 'not_run'>('not_run');
   const [accountId, setAccountId] = useState(defaultAccount?.id ?? '');
   const [busy, setBusy] = useState('');
@@ -1770,6 +2496,7 @@ export function ImportSplitwiseModal({ accounts, catalog, onClose, onImport }: I
       );
       setAlreadyCount(preview.rows.filter(r => r.alreadyImported).length);
       setSkipped(preview.skipped);
+      setSettlements(preview.settlements);
       setClassifier(preview.classifier);
       setStep('review');
     } catch (err) {
@@ -1892,13 +2619,20 @@ export function ImportSplitwiseModal({ accounts, catalog, onClose, onImport }: I
               {alreadyCount > 0 ? ` · ${alreadyCount} already imported` : ''}
               {skipped.length > 0 ? ` · ${skipped.length} skipped` : ''}
             </Text>
+            {settlements.length > 0 && (
+              <Text className="text-xs text-muted">
+                Settled up: {settlements.map(t => `${t.description} ${fmt(t.amount)} on ${fmtDate(t.date)}`).join(' · ')}
+              </Text>
+            )}
 
             {rows.length === 0 ? (
               <Text className="text-sm text-ink-secondary">Nothing new to import from this file.</Text>
             ) : (
               <ScrollView style={{ maxHeight: 360 }}>
                 {rows.map(r => {
-                  const low = r.chosen !== null && r.chosen === r.category && (r.confidence ?? 1) < LOW_CONFIDENCE;
+                  const suggested = r.chosen !== null && r.chosen === r.category;
+                  const low = suggested && r.source === 'laya' && (r.confidence ?? 1) < LOW_CONFIDENCE;
+                  const remembered = suggested && r.source === 'memory';
                   return (
                     <View key={r.fingerprint} className="flex-row items-center gap-3 border-b border-surface py-2">
                       <Pressable
@@ -1923,6 +2657,7 @@ export function ImportSplitwiseModal({ accounts, catalog, onClose, onImport }: I
                           options={[...(r.chosen ? [] : [{ label: 'Pick a category', value: '' }]), ...categoryOptions]}
                         />
                         {low && <Text className="text-[10px] font-medium text-[#ff9f0a]">Check this one</Text>}
+                        {remembered && <Text className="text-[10px] text-muted">Remembered</Text>}
                       </View>
                     </View>
                   );
@@ -2034,11 +2769,12 @@ In `app/src/screens/Dashboard.tsx`:
 Run: `cd app && npx tsc --noEmit`
 Expected: no errors.
 
-Then with the API from Task 4 Step 8 running and `EXPO_PUBLIC_API_URL=http://localhost:3001 npx expo start --web`, check each:
+Then with the API from Task 5 Step 8 running and `EXPO_PUBLIC_API_URL=http://localhost:3001 npx expo start --web`, check each:
 1. Add Expense, Add Credit, Add Salary, Transfer, Reconcile, Manage Categories still open at their usual width and still save.
 2. Import Splitwise → Choose CSV → member prompt appears the first time → review list shows only your-share amounts and Laya's categories.
 3. Change a category, untick a row, pick an account, import → dashboard shows the rows in the right months and the account balance drops by the shown total.
 4. Import the same file again → "Nothing new to import", with the already-imported count.
+4a. Upload a later export that repeats a description you corrected in step 3 → that row shows your corrected category with a "Remembered" tag and no "Check this one".
 5. Stop the Space (or set a wrong `LAYA_SPACE_URL`) → banner with Retry, categories empty, import blocked until each ticked row has one.
 6. A non-Splitwise CSV → readable error, modal stays usable.
 7. On an Android dev build (`npx expo run:android` or the existing EAS dev profile), repeat step 2 to confirm native file reading.
@@ -2052,21 +2788,23 @@ git commit -m "feat(app): import Splitwise CSV with Laya-suggested categories"
 
 ---
 
-### Task 6: Deploy
+### Task 7: Deploy
 
 **Files:** none in the repo beyond what earlier tasks committed.
 
 - [ ] **Step 1: Apply the migration to Supabase**
 
-Paste `migrations/004_splitwise_imports.sql` into the Supabase SQL editor and run it. Verify: `SELECT count(*) FROM splitwise_imports;` returns `0`.
+Paste `migrations/004_splitwise_imports.sql` into the Supabase SQL editor and run it. Verify: `SELECT count(*) FROM splitwise_imports;` returns `0`, and `SELECT name, description FROM categories LIMIT 1;` runs. Then fill in each category's description in the app (Manage categories → edit), using `docs/categories.md`.
 
-- [ ] **Step 2: Set Vercel environment variables**
+- [ ] **Step 2: Set Vercel environment variables (DEFERRED until Laya hosting is decided, see Task 1 Step 7)**
+
+Skip while hosting is undecided. Without these, the import works and the user picks categories by hand.
 
 In the Vercel project → Settings → Environment Variables (Production and Preview): `LAYA_SPACE_URL=https://<hf-username>-laya-categorizer.hf.space` and `LAYA_HF_TOKEN=<fine-grained token>`.
 
 - [ ] **Step 3: Deploy and smoke-test**
 
-Push/deploy as the project normally does. Then: `curl -s https://<app-domain>/api/health` returns `{"status":"ok"}`; in the deployed app, run Task 5 Step 7 checks 2–4 with a real export.
+Push/deploy as the project normally does. Then: `curl -s https://<app-domain>/api/health` returns `{"status":"ok"}`; in the deployed app, run Task 6 Step 7 checks 2–4 with a real export.
 
 - [ ] **Step 4: Update docs**
 

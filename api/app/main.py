@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .auth import require_auth
 from .config import settings
 from .errors import register_exception_handlers
-from .routes import accounts, categories, config, credits, health, payday, reconcile, salary, transactions, transfers
+from .routes import accounts, categories, config, credits, health, payday, reconcile, salary, splitwise, transactions, transfers
 
 app = FastAPI(title="Financial Tracker API")
 
@@ -49,3 +49,4 @@ app.include_router(transfers.router, prefix="/api/transfers", dependencies=[requ
 app.include_router(salary.router, prefix="/api/salary", dependencies=[require_auth])
 app.include_router(reconcile.router, prefix="/api/reconcile", dependencies=[require_auth])
 app.include_router(payday.router, prefix="/api/payday", dependencies=[require_auth])
+app.include_router(splitwise.router, prefix="/api/splitwise", dependencies=[require_auth])

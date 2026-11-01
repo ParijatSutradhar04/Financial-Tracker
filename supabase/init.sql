@@ -115,3 +115,39 @@ CREATE TABLE IF NOT EXISTS categories (
     hidden BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT clock_timestamp()
 );
+
+-- 7. Splitwise import
+-- Short description per category, given to the Laya categorizer
+-- (docs/categories.md). Empty means Laya only sees the name.
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS description VARCHAR(200) NOT NULL DEFAULT '';
+
+-- One row per Splitwise expense already imported, keyed on a fingerprint of
+-- date/description/cost/currency/occurrence (api/app/services/splitwise.py),
+-- so re-uploading an overlapping export never records an expense twice.
+CREATE TABLE IF NOT EXISTS splitwise_imports (
+    fingerprint CHAR(64) PRIMARY KEY,
+    transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+
+-- Category the user last confirmed for each description, keyed by
+-- splitwise.memory_key, so repeats skip Laya. A category name, not a foreign
+-- key: names that no longer exist are ignored at lookup time.
+CREATE TABLE IF NOT EXISTS category_memory (
+    description_key TEXT PRIMARY KEY,
+    category VARCHAR(50) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+
+-- No PostgREST access (see section 8).
+ALTER TABLE splitwise_imports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE category_memory ENABLE ROW LEVEL SECURITY;
+
+-- 8. Row level security
+-- Supabase exposes the public schema through PostgREST to anyone holding the
+-- (public) anon key. The API connects as postgres, which bypasses RLS, so
+-- enabling it with no policies shuts PostgREST out without affecting the app.
+-- Every new table in public needs the same line (api/tests/test_row_level_security.py).
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
