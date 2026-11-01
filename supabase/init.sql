@@ -142,3 +142,12 @@ CREATE TABLE IF NOT EXISTS category_memory (
 -- No PostgREST access (see section 8).
 ALTER TABLE splitwise_imports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE category_memory ENABLE ROW LEVEL SECURITY;
+
+-- 8. Row level security
+-- Supabase exposes the public schema through PostgREST to anyone holding the
+-- (public) anon key. The API connects as postgres, which bypasses RLS, so
+-- enabling it with no policies shuts PostgREST out without affecting the app.
+-- Every new table in public needs the same line (api/tests/test_row_level_security.py).
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
