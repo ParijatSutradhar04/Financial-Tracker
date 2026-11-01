@@ -9,6 +9,11 @@
 -- and on Supabase by pasting it into the SQL editor (or psql against the
 -- direct connection, port 5432). Safe to run more than once.
 --
+-- Apply BEFORE deploying the API that ships with it: that API reads
+-- categories.description on every /api/config call, so without the column
+-- the dashboard fails to load. The column is additive, so the API deployed
+-- before it is unaffected.
+--
 -- Everything the Splitwise import needs: a short description per category
 -- for the Laya categorizer, and (added in Task 5) the dedup and
 -- category-memory tables.
