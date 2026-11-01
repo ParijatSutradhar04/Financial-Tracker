@@ -35,6 +35,7 @@ class ConfiguredCategory(BaseModel):
     name: str = Field(min_length=1, max_length=50)
     icon: str = Field(min_length=1)
     color: str
+    description: str = Field(default="", max_length=200)
 
     @model_validator(mode="after")
     def _check_color(self) -> "ConfiguredCategory":

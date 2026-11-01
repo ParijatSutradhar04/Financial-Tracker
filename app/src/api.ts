@@ -24,11 +24,20 @@ export interface Category {
   spendable: boolean;
   /** Kept out of the dashboard entirely, though still in the ledger. */
   hidden: boolean;
+  /** Plain words for what goes in the category; the Splitwise import's categorizer reads it. */
+  description: string;
 }
 
 /** Accounts, cards, and categories all come from the backend config file. */
 export interface AppConfig {
   categories: Category[];
+}
+
+export interface CategoryInput {
+  name: string;
+  icon: string;
+  color: string;
+  description?: string;
 }
 
 export interface Transaction {
@@ -142,13 +151,13 @@ export const api = {
       body: json(body),
     }),
 
-  addCategory: (body: { name: string; icon: string; color: string }) =>
+  addCategory: (body: CategoryInput) =>
     request<Category>('/categories', {
       method: 'POST',
       body: json(body),
     }),
 
-  updateCategory: (id: string, body: { name: string; icon: string; color: string }) =>
+  updateCategory: (id: string, body: CategoryInput) =>
     request<Category>(`/categories/${id}`, {
       method: 'PATCH',
       body: json(body),

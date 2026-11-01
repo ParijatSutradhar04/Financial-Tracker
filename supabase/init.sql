@@ -115,3 +115,8 @@ CREATE TABLE IF NOT EXISTS categories (
     hidden BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT clock_timestamp()
 );
+
+-- 7. Splitwise import
+-- Short description per category, given to the Laya categorizer
+-- (docs/categories.md). Empty means Laya only sees the name.
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS description VARCHAR(200) NOT NULL DEFAULT '';

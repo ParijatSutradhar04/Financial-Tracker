@@ -29,7 +29,7 @@ def _reject_reserved(name: str) -> None:
 async def add_category(body: CategoryIn) -> CategoryOut:
     _reject_reserved(body.name)
     async with db_transaction() as conn:
-        row = await create_category(conn, body.name, body.icon, body.color)
+        row = await create_category(conn, body.name, body.icon, body.color, body.description or "")
     return CategoryOut(**row)
 
 
@@ -37,7 +37,7 @@ async def add_category(body: CategoryIn) -> CategoryOut:
 async def edit_category(category_id: str, body: CategoryIn) -> CategoryOut:
     _reject_reserved(body.name)
     async with db_transaction() as conn:
-        row = await update_category(conn, category_id, body.name, body.icon, body.color)
+        row = await update_category(conn, category_id, body.name, body.icon, body.color, body.description)
     return CategoryOut(**row)
 
 

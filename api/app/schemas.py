@@ -120,6 +120,7 @@ class CategoryOut(CamelModel):
     color: str
     spendable: bool
     hidden: bool
+    description: str = ""
 
 
 class ConfigOut(CamelModel):
@@ -307,6 +308,12 @@ class CategoryIn(CamelModel):
     name: str = Field(min_length=1, max_length=50)
     icon: str = Field(min_length=1, max_length=10)
     color: str
+    description: Optional[str] = Field(default=None, max_length=200)
+
+    @field_validator("description")
+    @classmethod
+    def _description(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() if v is not None else None
 
     @field_validator("color")
     @classmethod

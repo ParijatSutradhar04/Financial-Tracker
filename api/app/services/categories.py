@@ -15,7 +15,7 @@ from ..errors import bad_request, not_found
 
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
-CATEGORY_COLUMNS = "id, name, icon, color, spendable, hidden"
+CATEGORY_COLUMNS = "id, name, icon, color, spendable, hidden, description"
 
 
 def to_category(row: asyncpg.Record) -> dict:
@@ -26,6 +26,7 @@ def to_category(row: asyncpg.Record) -> dict:
         "color": row["color"],
         "spendable": row["spendable"],
         "hidden": row["hidden"],
+        "description": row["description"],
     }
 
 
@@ -45,32 +46,42 @@ async def category_names(conn: asyncpg.connection.Connection) -> set[str]:
     return {row["name"] for row in rows}
 
 
-async def create_category(conn: asyncpg.connection.Connection, name: str, icon: str, color: str) -> dict:
+async def create_category(
+    conn: asyncpg.connection.Connection, name: str, icon: str, color: str, description: str = ""
+) -> dict:
     _check_color(color)
     row = await conn.fetchrow(
-        f"""INSERT INTO categories (name, icon, color)
-                 VALUES ($1, $2, $3)
+        f"""INSERT INTO categories (name, icon, color, description)
+                 VALUES ($1, $2, $3, $4)
               RETURNING {CATEGORY_COLUMNS}""",
         name,
         icon,
         color,
+        description,
     )
     return to_category(row)
 
 
 async def update_category(
-    conn: asyncpg.connection.Connection, category_id: str, name: str, icon: str, color: str
+    conn: asyncpg.connection.Connection,
+    category_id: str,
+    name: str,
+    icon: str,
+    color: str,
+    description: str | None = None,
 ) -> dict:
+    """description=None keeps the stored one (clients that predate the field)."""
     _check_color(color)
     row = await conn.fetchrow(
         f"""UPDATE categories
-               SET name = $2, icon = $3, color = $4
+               SET name = $2, icon = $3, color = $4, description = COALESCE($5, description)
              WHERE id = $1::uuid
          RETURNING {CATEGORY_COLUMNS}""",
         category_id,
         name,
         icon,
         color,
+        description,
     )
     if row is None:
         raise not_found(f"Category {category_id} not found")
@@ -100,13 +111,14 @@ async def provision_categories(conn: asyncpg.connection.Connection) -> dict:
 
     for category in finance_config.categories:
         row = await conn.fetchrow(
-            """INSERT INTO categories (name, icon, color)
-                    VALUES ($1, $2, $3)
+            """INSERT INTO categories (name, icon, color, description)
+                    VALUES ($1, $2, $3, $4)
                ON CONFLICT (name) DO NOTHING
                  RETURNING name""",
             category.name,
             category.icon,
             category.color,
+            category.description,
         )
         if row is not None:
             created.append(category.name)
