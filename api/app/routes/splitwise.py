@@ -64,18 +64,19 @@ async def preview(body: SplitwisePreviewIn) -> SplitwisePreviewOut:
     if not parsed.settled:
         raise bad_request(unsettled_message(parsed.unsettled))
 
-    if len(parsed.rows) > SPLITWISE_MAX_ROWS:
-        raise bad_request(
-            f"The export has {len(parsed.rows)} expenses; import at most {SPLITWISE_MAX_ROWS} at a time"
-        )
-
     async with acquire() as conn:
         imported = await already_imported(conn, [r.fingerprint for r in parsed.rows])
+        fresh = [r for r in parsed.rows if r.fingerprint not in imported]
+        # Splitwise always exports the whole history, so only the new rows
+        # are capped (the request size limit bounds the file itself).
+        if len(fresh) > SPLITWISE_MAX_ROWS:
+            raise bad_request(
+                f"The export has {len(fresh)} new expenses; import at most {SPLITWISE_MAX_ROWS} at a time"
+            )
         # Laya scores against each category's description (docs/categories.md).
         choices = [
             {"name": c["name"], "description": c["description"]} for c in await list_categories(conn) if c["spendable"]
         ]
-        fresh = [r for r in parsed.rows if r.fingerprint not in imported]
         keys = {r.fingerprint: memory_key(r.description) for r in fresh}
         remembered = await recall_categories(conn, sorted({k for k in keys.values() if k}))
 

@@ -232,3 +232,28 @@ async def test_classifier_status(client, monkeypatch):
     r = await client.get("/api/splitwise/classifier-status")
     assert r.json() == {"ready": True}
 
+
+
+def history(n):
+    """A settled export with n expenses Asha paid (my share 10 each), then my settle-up."""
+    rows = [f"2026-08-{1 + i % 28:02d},Item {i},Groceries,20.00,INR,-10.00,10.00" for i in range(n)]
+    owed = 10 * n
+    return make_csv([*rows, f"2026-08-29,Parijat S. paid Asha K.,Payment,{owed}.00,INR,{owed}.00,-{owed}.00"])
+
+
+async def test_row_cap_counts_only_new_expenses(client, laya_ok, monkeypatch):
+    # Splitwise always exports the whole history, so a long-running group
+    # outgrows any cap on the file itself. Only what is new may be capped.
+    monkeypatch.setattr(splitwise_routes, "SPLITWISE_MAX_ROWS", 3)
+    old = await preview(client, csv=history(3))
+    rows = [
+        {k: r[k] for k in ("fingerprint", "date", "description", "amount")} | {"category": "Food"} for r in old["rows"]
+    ]
+    r = await client.post("/api/splitwise/import", json={"accountId": client.account_id, "rows": rows})
+    assert r.status_code == 201, r.text
+
+    body = await preview(client, csv=history(4))
+    assert [x["description"] for x in body["rows"] if not x["alreadyImported"]] == ["Item 3"]
+
+    r = await client.post("/api/splitwise/preview", json={"csv": history(8), "memberName": ME})
+    assert r.status_code == 400 and "5 new expenses" in r.json()["error"], r.text
